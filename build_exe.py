@@ -26,7 +26,10 @@ def build_exe():
         "--hidden-import", "pyodbc",
         "--hidden-import", "db_utils",
         "--hidden-import", "setup_triggers",
-        "--hidden-import", "logger",    
+        "--hidden-import", "logger",
+        "--hidden-import", "multi_source_config",
+        "--hidden-import", "deduplication_engine",
+        "--hidden-import", "content_hasher",
         entry_point
     ]
 

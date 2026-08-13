@@ -19,16 +19,16 @@ FAST_EXEC_FAIL_CACHE = set()
 def connect_db(prefix: str, target: bool = False):
     prefix = prefix.upper()
     if target:
-        host = os.getenv(f"{prefix}_DST_SQLSERVER_HOST", os.getenv(f"{prefix}_SQLSERVER_HOST"))
-        port = os.getenv(f"{prefix}_DST_SQLSERVER_PORT", "1433")
-        user = os.getenv(f"{prefix}_DST_SQLSERVER_USER", os.getenv(f"{prefix}_SQLSERVER_USER"))
-        password = os.getenv(f"{prefix}_DST_SQLSERVER_PASS", os.getenv(f"{prefix}_SQLSERVER_PASS"))
-        database = os.getenv(f"{prefix}_DST_SQLSERVER_DB", os.getenv(f"{prefix}_SQLSERVER_DB"))
+        host = os.getenv(f"{prefix}_DST_SQLSERVER_HOST", os.getenv("DST_SQLSERVER_HOST", os.getenv(f"{prefix}_SQLSERVER_HOST")))
+        port = os.getenv(f"{prefix}_DST_SQLSERVER_PORT", os.getenv("DST_SQLSERVER_PORT", "1433"))
+        user = os.getenv(f"{prefix}_DST_SQLSERVER_USER", os.getenv("DST_SQLSERVER_USER", os.getenv(f"{prefix}_SQLSERVER_USER")))
+        password = os.getenv(f"{prefix}_DST_SQLSERVER_PASS", os.getenv("DST_SQLSERVER_PASS", os.getenv(f"{prefix}_SQLSERVER_PASS")))
+        database = os.getenv(f"{prefix}_DST_SQLSERVER_DB", os.getenv("DST_SQLSERVER_DB", os.getenv(f"{prefix}_SQLSERVER_DB")))
     else:
         host = os.getenv(f"{prefix}_SQLSERVER_HOST")
         port = os.getenv(f"{prefix}_SQLSERVER_PORT", "1433")
         user = os.getenv(f"{prefix}_SQLSERVER_USER")
-        password = os.getenv(f"{prefix}_SQLSERVER_PASS")
+        password = os.getenv(f"{prefix}_SQLSERVER_PASS", "")
         database = os.getenv(f"{prefix}_SQLSERVER_DB")
 
     conn_str = (
@@ -49,12 +49,10 @@ def connect_db(prefix: str, target: bool = False):
         )
         init_cursor.close()
         conn.commit()
-        Logger.info(f"Connected to {database} ({'target' if target else 'source'})")
         return conn
     except Exception as e:
         Logger.error(f"Cannot connect to SQL Server {database}", exc=e)
         raise
-
 
 def ensure_table_exists(src_conn, dst_conn, table_name: str):
     table_name_clean = table_name.split(".")[-1]
