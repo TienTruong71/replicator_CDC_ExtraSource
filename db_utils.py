@@ -99,9 +99,6 @@ def ensure_table_exists(src_conn, dst_conn, table_name: str):
         else:
             col_defs[-1] += " NOT NULL"
 
-    # Add sync_source_id to support multi-source data merging
-    col_defs.append("[sync_source_id] NVARCHAR(50) NULL")
-
     ddl = f"CREATE TABLE dbo.[{table_name_clean}] (\n    {',\n    '.join(col_defs)}\n);"
 
     try:
@@ -286,30 +283,25 @@ def upsert_data_odbc(dst_conn, table, rows, primary_key):
                         if len(row[cl]) > limit:
                             row[cl] = row[cl][:limit]
 
-            has_source_id = 'sync_source_id' in [c.lower() for c in columns]
             col_list = ", ".join(f"[{c}]" for c in columns)
             placeholders_vals = ", ".join(["?" for _ in columns])
-            update_cols = [c for c in columns if c.lower() != pk_col.lower() and c.lower() not in identity_cols and c.lower() != 'sync_source_id']
+            update_cols = [c for c in columns if c.lower() != pk_col.lower() and c.lower() not in identity_cols]
 
             pks_in_batch = []
             for row in rows:
                 pk_val = row.get(pk_col)
-                pks_in_batch.append(str(pk_val))
+                if isinstance(pk_val, int):
+                    pks_in_batch.append(str(pk_val))
+                else:
+                    pks_in_batch.append(str(pk_val))
 
             existing_pks = set()
             chunk_size_check = 1000
             for i in range(0, len(pks_in_batch), chunk_size_check):
                 chunk = pks_in_batch[i : i + chunk_size_check]
                 placeholders_pk = ", ".join(["?" for _ in chunk])
-                
-                if has_source_id:
-                    # Assuming batch belongs to the same source
-                    source_id_val = rows[0].get('sync_source_id')
-                    check_query = f"SELECT [{pk_col}] FROM {table_full} WHERE [{pk_col}] IN ({placeholders_pk}) AND [sync_source_id] = ?"
-                    cursor.execute(check_query, tuple(chunk) + (source_id_val,))
-                else:
-                    check_query = f"SELECT [{pk_col}] FROM {table_full} WHERE [{pk_col}] IN ({placeholders_pk})"
-                    cursor.execute(check_query, tuple(chunk))
+                check_query = f"SELECT [{pk_col}] FROM {table_full} WHERE [{pk_col}] IN ({placeholders_pk})"
+                cursor.execute(check_query, tuple(chunk))
                 existing_pks.update({str(r[0]) for r in cursor.fetchall()})
 
             for row in rows:
@@ -318,10 +310,7 @@ def upsert_data_odbc(dst_conn, table, rows, primary_key):
 
                 if str_pk in existing_pks:
                     update_values = [row.get(c) for c in update_cols]
-                    if has_source_id:
-                        update_params.append(tuple(update_values + [pk_val, row.get('sync_source_id')]))
-                    else:
-                        update_params.append(tuple(update_values + [pk_val]))
+                    update_params.append(tuple(update_values + [pk_val]))
                 else:
                     insert_values = [row.get(c) for c in columns]
                     insert_params.append(tuple(insert_values))
@@ -332,10 +321,7 @@ def upsert_data_odbc(dst_conn, table, rows, primary_key):
 
             if update_params and update_cols:
                 set_clauses_exec = ", ".join([f"[{c}] = ?" for c in update_cols])
-                if has_source_id:
-                    update_sql = f"UPDATE {table_full} SET {set_clauses_exec} WHERE [{pk_col}] = ? AND [sync_source_id] = ?"
-                else:
-                    update_sql = f"UPDATE {table_full} SET {set_clauses_exec} WHERE [{pk_col}] = ?"
+                update_sql = f"UPDATE {table_full} SET {set_clauses_exec} WHERE [{pk_col}] = ?"
                 chunk_size_exec = 1000
                 use_fast_update = table_full not in FAST_EXEC_FAIL_CACHE
 
@@ -447,10 +433,6 @@ def sync_schema_direct(src_conn, dst_conn, schema, table):
     for col, meta in src_cols.items():
         if col not in dst_cols:
             sql_updates.append(f"ALTER TABLE [{schema}].[{table}] ADD [{col}] {to_sql_type(meta)}")
-
-    # Ensure sync_source_id exists for multi-source
-    if 'sync_source_id' not in dst_cols:
-        sql_updates.append(f"ALTER TABLE [{schema}].[{table}] ADD [sync_source_id] NVARCHAR(50) NULL")
 
     if not sql_updates:
         return

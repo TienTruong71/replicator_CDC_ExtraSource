@@ -80,7 +80,7 @@ def start_replicator():
                 try:
                     src_conn = connect_db(prefix, target=False)
                     dst_conn = connect_db(prefix, target=True)
-                    
+
                     state = source_states[source_id]
 
                     if not state.get('audit_log_ensured', False):
@@ -180,6 +180,8 @@ def start_replicator():
                                     valid_rows.append(row)
 
                                 if valid_rows:
+                                    for r in valid_rows:
+                                        r['sync_source_id'] = source_id
                                     upsert_data_odbc(dst_conn, table, valid_rows, pk_col)
                                     Logger.info(f"[{source_id}] Table: {table:<25} | Sync: {len(valid_rows):>4} rows | Status: [OK]", indent=1)
 

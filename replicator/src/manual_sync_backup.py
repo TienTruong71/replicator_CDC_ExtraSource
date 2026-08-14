@@ -118,12 +118,18 @@ def run_manual_sync(specific_table=None):
     dst_conn = connect_db(prefix, target=True)
     audit_conn = connect_db(prefix, target=False)
 
+    from setup_triggers import ensure_audit_log_table
+    ensure_audit_log_table(audit_conn)
+
+
+
     try:
         if specific_table:
             tables = [specific_table]
         else:
             from setup_triggers import get_monitored_tables
-            tables = get_monitored_tables(src_conn, prefix=prefix)
+            insert_only = os.getenv(f"{prefix}_INSERT_ONLY", "false").lower() == "true"
+            tables = get_monitored_tables(src_conn, prefix=prefix, insert_only=insert_only)
 
         if not tables:
             Logger.warn("No monitored tables found to sync.")
@@ -145,3 +151,4 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     run_manual_sync(args.table)
+

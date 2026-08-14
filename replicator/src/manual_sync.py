@@ -1,4 +1,4 @@
-import os
+﻿import os
 import sys
 import time
 from dotenv import load_dotenv
@@ -117,11 +117,11 @@ def run_manual_sync(specific_table=None):
     src_conn = connect_db(prefix, target=False)
     dst_conn = connect_db(prefix, target=True)
     audit_conn = connect_db(prefix, target=False)
-    
+
     # Ensure sync_audit_log table exists in target database
     from setup_triggers import ensure_audit_log_table
     ensure_audit_log_table(audit_conn)
-        
+
 
 
     try:
@@ -146,6 +146,48 @@ def run_manual_sync(specific_table=None):
         dst_conn.close()
         audit_conn.close()
 
+
+def force_full_resync(table_name=None):
+    """Force full resync by clearing audit log and re-queuing all missing records."""
+    prefix = "KINGDOM"
+    Logger.info("Starting FORCE FULL RESYNC...")
+    
+    src_conn = connect_db(prefix, target=False)
+    dst_conn = connect_db(prefix, target=True)
+    audit_conn = connect_db(prefix, target=False)
+    
+    try:
+        cursor = audit_conn.cursor()
+        
+        if table_name:
+            # Clear specific table from audit log
+            Logger.info(f"Clearing audit log for table: {table_name}")
+            cursor.execute("DELETE FROM dbo.sync_audit_log WHERE table_name = ?", (table_name,))
+            tables = [table_name]
+        else:
+            # Clear all audit log
+            Logger.info("Clearing entire audit log...")
+            cursor.execute("DELETE FROM dbo.sync_audit_log")
+            
+            from setup_triggers import get_monitored_tables
+            insert_only = os.getenv(f"{prefix}_INSERT_ONLY", "false").lower() == "true"
+            tables = get_monitored_tables(src_conn, prefix=prefix, insert_only=insert_only)
+        
+        audit_conn.commit()
+        Logger.success(f"Cleared audit log for {len(tables)} tables")
+        
+        # Re-queue missing records
+        for table in tables:
+            Logger.process(f"Re-queuing missing records for: {table}")
+            find_and_queue_missing(src_conn, dst_conn, audit_conn, table)
+            
+    finally:
+        src_conn.close()
+        dst_conn.close() 
+        audit_conn.close()
+        
+    Logger.success("Force full resync completed!")
+
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Manual Differential Sync for Missing Rows")
@@ -153,4 +195,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     run_manual_sync(args.table)
+
+
 

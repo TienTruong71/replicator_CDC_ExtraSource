@@ -1,4 +1,4 @@
-"""
+﻿"""
 Deduplication Engine for Multi-Source Insert-Only Sync
 
 This module implements hash-based duplicate detection logic with memory cache
@@ -386,8 +386,7 @@ class DeduplicationEngine:
                 result = cursor.fetchone()
                 if result:
                     original_source, created_at = result
-                    # self.logger.debug(f"Hash found in database: {table} (hash: {record_hash[:12]}...) "
-                                    f"originally from {original_source} at {created_at}")
+                    # Duplicate found in database (debug log removed)
 
                     cursor.execute("""
                         UPDATE dbo.sync_dedup_tracker
@@ -541,7 +540,7 @@ def validate_deduplication_setup() -> bool:
     """
     try:
         engine = DeduplicationEngine()
-                test_record = {'id': 1, 'name': 'test'}
+        test_record = {'id': 1, 'name': 'test'}
         test_result = engine.is_duplicate('test_table', test_record, 'TEST_SOURCE')
 
         Logger.success("Deduplication engine validation passed")
@@ -550,3 +549,5 @@ def validate_deduplication_setup() -> bool:
     except Exception as e:
         Logger.error("Deduplication engine validation failed", exc=e)
         return False
+
+
