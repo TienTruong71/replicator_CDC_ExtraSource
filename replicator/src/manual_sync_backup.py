@@ -1,4 +1,4 @@
-import os
+﻿import os
 import sys
 import time
 from dotenv import load_dotenv
@@ -117,21 +117,13 @@ def run_manual_sync(specific_table=None):
     src_conn = connect_db(prefix, target=False)
     dst_conn = connect_db(prefix, target=True)
     audit_conn = connect_db(prefix, target=False)
-    
-    # Ensure sync_audit_log table exists in target database
-    from setup_triggers import ensure_audit_log_table
-    ensure_audit_log_table(audit_conn)
-        
-
 
     try:
         if specific_table:
             tables = [specific_table]
         else:
-            # Fixed: Add prefix parameter to get_monitored_tables
             from setup_triggers import get_monitored_tables
-            insert_only = os.getenv(f"{prefix}_INSERT_ONLY", "false").lower() == "true"
-            tables = get_monitored_tables(src_conn, prefix=prefix, insert_only=insert_only)
+            tables = get_monitored_tables(src_conn, prefix=prefix)
 
         if not tables:
             Logger.warn("No monitored tables found to sync.")
@@ -153,4 +145,3 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     run_manual_sync(args.table)
-

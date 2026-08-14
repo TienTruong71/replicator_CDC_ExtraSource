@@ -31,7 +31,6 @@ class ContentHasher:
     - Produces deterministic results regardless of input order
     """
 
-    # Metadata columns to exclude from hash calculation
     METADATA_COLUMNS = {
         'created_at', 'updated_at', 'source_id', 'sync_timestamp',
         'processed_at', 'last_modified', 'insert_time', 'update_time',
@@ -62,18 +61,14 @@ class ContentHasher:
             raise ValueError("Record cannot be empty for hash computation")
 
         try:
-            # Remove metadata columns
             cleaned_record = self.exclude_metadata_columns(record)
 
             if not cleaned_record:
                 self.logger.warn(f"All columns in {table_name} record are metadata - using table name for hash")
-                # If all columns are metadata, hash the table name to maintain uniqueness
                 cleaned_record = {'_table_name': table_name}
 
-            # Normalize and sort the record for deterministic hashing
             normalized_record = self._normalize_record(cleaned_record)
 
-            # Convert to JSON with sorted keys for consistency
             json_str = json.dumps(normalized_record, sort_keys=True, separators=(',', ':'))
 
             # Compute SHA-256 hash

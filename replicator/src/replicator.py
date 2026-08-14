@@ -22,9 +22,11 @@ except ImportError:
 try:
     from setup_triggers import auto_discover_new_tables, setup_triggers, get_monitored_tables, ensure_audit_log_table
     from logger import Logger
+    from schema_validator import SchemaValidator
 except ImportError:
     from .setup_triggers import auto_discover_new_tables, setup_triggers, get_monitored_tables, ensure_audit_log_table
     from .logger import Logger
+    from .schema_validator import SchemaValidator
 
 try:
     from manual_sync import run_manual_sync
@@ -232,3 +234,4 @@ if __name__ == "__main__":
         run_manual_sync(args.table)
 
     start_replicator()
+

@@ -39,7 +39,6 @@ def connect_db(prefix: str, target: bool = False):
 
     try:
         conn = pyodbc.connect(conn_str, autocommit=False)
-        # Ensure ANSI SET options are correct for computed column indexes
         init_cursor = conn.cursor()
         init_cursor.execute(
             "SET ANSI_NULLS ON; "
