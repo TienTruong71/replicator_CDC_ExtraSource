@@ -80,23 +80,13 @@ class MultiSourceConfig:
         with self._config_lock:
             self._sources.clear()
 
-            sync_sources = os.getenv("SYNC_SOURCES", "")
+            try:
+                from db_utils import get_source_prefix
+                prefix = get_source_prefix()
+            except ImportError:
+                prefix = "SOURCE"
 
-            if not sync_sources:
-                if self._has_legacy_config():
-                    Logger.info("No SYNC_SOURCES found, using legacy KINGDOM_ configuration")
-                    kingdom_config = self._load_legacy_config()
-                    if kingdom_config:
-                        self._sources["KINGDOM"] = kingdom_config
-                else:
-                    Logger.warn("No source configurations found. Set SYNC_SOURCES environment variable.")
-                return self._sources.copy()
-
-            source_prefixes = [prefix.strip().upper() for prefix in sync_sources.split(",") if prefix.strip()]
-
-            if not source_prefixes:
-                Logger.warn("SYNC_SOURCES is empty. No sources configured.")
-                return self._sources.copy()
+            source_prefixes = [prefix]
 
             Logger.info(f"Loading configurations for sources: {', '.join(source_prefixes)}")
 
@@ -324,7 +314,11 @@ class MultiSourceConfig:
 
         # Optional parameters with defaults
         port_str = os.getenv(f"{prefix}_SQLSERVER_PORT", "1433")
-        source_id = os.getenv(f"{prefix}_SOURCE_ID", prefix)
+        try:
+            from db_utils import get_source_id
+            source_id = get_source_id()
+        except ImportError:
+            source_id = os.getenv("SOURCE_ID", prefix)
         batch_size_str = os.getenv(f"{prefix}_BATCH_SIZE", "500")
         poll_interval_str = os.getenv(f"{prefix}_POLL_INTERVAL", "1.0")
         insert_only_str = os.getenv(f"{prefix}_INSERT_ONLY", "false")

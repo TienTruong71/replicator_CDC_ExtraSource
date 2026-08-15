@@ -4,24 +4,23 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'replicator', 'src'))
 
+from db_utils import connect_db, get_source_prefix
+
 def check_setup_status():
     """Check if system is already set up"""
     try:
-        from db_utils import connect_db
         from dotenv import load_dotenv
         load_dotenv()
 
-        conn = connect_db("KINGDOM", target=False)
+        conn = connect_db(get_source_prefix(), target=False)
         cursor = conn.cursor()
 
-        # Check if triggers exist
         cursor.execute("""
             SELECT COUNT(*) FROM sys.triggers t
             WHERE t.name LIKE 'trig_cdc_%'
         """)
         trigger_count = cursor.fetchone()[0]
 
-        # Check if audit log table has proper structure
         cursor.execute("""
             SELECT COUNT(*) FROM sys.columns
             WHERE object_id = OBJECT_ID('dbo.sync_audit_log')
@@ -79,14 +78,15 @@ def check_initial_sync_needed():
         from db_utils import connect_db
         import os
 
-        sync_tables = os.getenv("KINGDOM_SYNC_TABLES", "")
+        prefix = get_source_prefix()
+        sync_tables = os.getenv(f"{prefix}_SYNC_TABLES", "")
         if not sync_tables:
             return False
 
         tables = [t.strip() for t in sync_tables.split(",")]
 
-        src_conn = connect_db("KINGDOM", target=False)
-        dst_conn = connect_db("KINGDOM", target=True)
+        src_conn = connect_db(prefix, target=False)
+        dst_conn = connect_db(prefix, target=True)
 
         src_cursor = src_conn.cursor()
         dst_cursor = dst_conn.cursor()
@@ -176,13 +176,12 @@ def auto_run():
 def show_final_status():
     """Show final system status"""
     try:
-        from db_utils import connect_db
         import os
 
-        conn = connect_db("KINGDOM", target=False)
+        prefix = get_source_prefix()
+        conn = connect_db(prefix, target=False)
         cursor = conn.cursor()
 
-        # Show triggers
         cursor.execute("""
             SELECT COUNT(*) FROM sys.triggers t
             WHERE t.name LIKE 'trig_cdc_%'
@@ -191,11 +190,10 @@ def show_final_status():
         print(f"CDC Triggers: {trigger_count}")
 
         # Show data comparison
-        sync_tables = os.getenv("KINGDOM_SYNC_TABLES", "")
+        sync_tables = os.getenv(f"{prefix}_SYNC_TABLES", "")
         if sync_tables:
             tables = [t.strip() for t in sync_tables.split(",")]
-
-            dst_conn = connect_db("KINGDOM", target=True)
+            dst_conn = connect_db(prefix, target=True)
             dst_cursor = dst_conn.cursor()
 
             print("Data Status:")
@@ -222,6 +220,7 @@ def show_final_status():
 
     except Exception as e:
         print(f"Status check error: {e}")
+
 
 def main():
     if len(sys.argv) > 1 and sys.argv[1] == "--manual":

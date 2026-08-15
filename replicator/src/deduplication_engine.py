@@ -1,4 +1,4 @@
-﻿"""
+"""
 Deduplication Engine for Multi-Source Insert-Only Sync
 
 This module implements hash-based duplicate detection logic with memory cache
@@ -18,11 +18,11 @@ import pyodbc
 try:
     from logger import Logger
     from content_hasher import ContentHasher
-    from db_utils import connect_db
+    from db_utils import connect_db, get_source_prefix
 except ImportError:
     from .logger import Logger
     from .content_hasher import ContentHasher
-    from .db_utils import connect_db
+    from .db_utils import connect_db, get_source_prefix
 
 
 class CleanupStats(NamedTuple):
@@ -196,7 +196,7 @@ class DeduplicationEngine:
             # In a real deployment, this should use the target database connection
             conn = None
             try:
-                conn = connect_db("KINGDOM", target=True)
+                conn = connect_db(get_source_prefix(), target=True)
                 cursor = conn.cursor()
 
                 # Clean up old deduplication tracker entries
@@ -373,7 +373,7 @@ class DeduplicationEngine:
 
             self._ensure_dedup_tracker_table()
 
-            conn = connect_db("KINGDOM", target=True)
+            conn = connect_db(get_source_prefix(), target=True)
             cursor = conn.cursor()
 
             try:
@@ -419,7 +419,7 @@ class DeduplicationEngine:
         try:
             self._ensure_dedup_tracker_table()
 
-            conn = connect_db("KINGDOM", target=True)
+            conn = connect_db(get_source_prefix(), target=True)
             cursor = conn.cursor()
 
             try:
@@ -450,7 +450,7 @@ class DeduplicationEngine:
         This method creates the table and indexes if they don't exist.
         """
         try:
-            conn = connect_db("KINGDOM", target=True)
+            conn = connect_db(get_source_prefix(), target=True)
             cursor = conn.cursor()
 
             try:

@@ -11,12 +11,14 @@ try:
         connect_db, ensure_table_exists, get_primary_key,
         upsert_data_odbc,
         sync_schema_direct, fetch_rows_by_pks,
+        get_source_id,
     )
 except ImportError:
     from .db_utils import (
         connect_db, ensure_table_exists, get_primary_key,
         upsert_data_odbc,
         sync_schema_direct, fetch_rows_by_pks,
+        get_source_id,
     )
 
 try:
@@ -180,10 +182,11 @@ def start_replicator():
                                     valid_rows.append(row)
 
                                 if valid_rows:
+                                    machine_id = get_source_id()
                                     for r in valid_rows:
-                                        r['sync_source_id'] = source_id
+                                        r['sync_source_id'] = machine_id
                                     upsert_data_odbc(dst_conn, table, valid_rows, pk_col)
-                                    Logger.info(f"[{source_id}] Table: {table:<25} | Sync: {len(valid_rows):>4} rows | Status: [OK]", indent=1)
+                                    Logger.info(f"[{machine_id}] Table: {table:<25} | Sync: {len(valid_rows):>4} rows | Status: [OK]", indent=1)
 
                     if log_ids:
                         update_cursor = src_conn.cursor()

@@ -1,4 +1,4 @@
-﻿"""
+"""
 Initial Sync Tool - Auto Mode with Schema Validation
 Sync existing data before starting CDC Replicator - Fully Automated
 """
@@ -9,6 +9,8 @@ import time
 from datetime import datetime
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'replicator', 'src'))
+
+from db_utils import connect_db, get_source_prefix
 
 def check_dependencies():
     """Check if required dependencies are installed"""
@@ -42,13 +44,16 @@ def test_connections():
         from dotenv import load_dotenv
         load_dotenv()
 
+        prefix = get_source_prefix()
+        print(f"[INFO] Using source prefix: {prefix}")
+
         # Test source connection
-        src_conn = connect_db("KINGDOM", target=False)
+        src_conn = connect_db(prefix, target=False)
         print("[OK] Source database connected")
         src_conn.close()
 
         # Test target connection
-        dst_conn = connect_db("KINGDOM", target=True)
+        dst_conn = connect_db(prefix, target=True)
         print("[OK] Target database connected")
         dst_conn.close()
 
@@ -62,7 +67,7 @@ def check_system_setup():
     try:
         from db_utils import connect_db
 
-        conn = connect_db("KINGDOM", target=False)
+        conn = connect_db(get_source_prefix(), target=False)
         cursor = conn.cursor()
 
         cursor.execute("""
@@ -95,7 +100,8 @@ def validate_schemas():
         import os
 
         # Get configured tables
-        sync_tables = os.getenv("KINGDOM_SYNC_TABLES", "")
+        prefix = get_source_prefix()
+        sync_tables = os.getenv(f"{prefix}_SYNC_TABLES", "")
         if not sync_tables:
             print("[ERROR] No SYNC_TABLES configured in .env file")
             return False
@@ -104,8 +110,8 @@ def validate_schemas():
         print(f"[INFO] Tables to validate: {', '.join(tables)}")
 
         # Connect to databases
-        src_conn = connect_db("KINGDOM", target=False)  # Source
-        dst_conn = connect_db("KINGDOM", target=True)   # Target
+        src_conn = connect_db(prefix, target=False)  # Source
+        dst_conn = connect_db(prefix, target=True)   # Target
 
         # Validate each table
         validator = SimpleColumnValidator()
@@ -139,7 +145,7 @@ def check_audit_log_status():
     try:
         from db_utils import connect_db
 
-        conn = connect_db("KINGDOM", target=False)  # Audit_log at source DB
+        conn = connect_db(get_source_prefix(), target=False)  # Audit_log at source DB
         cursor = conn.cursor()
 
         cursor.execute("SELECT COUNT(*) FROM sync_audit_log WHERE status = 'pending'")

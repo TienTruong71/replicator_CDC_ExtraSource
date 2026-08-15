@@ -1,4 +1,4 @@
-﻿import os
+import os
 import sys
 import time
 from dotenv import load_dotenv
@@ -6,10 +6,10 @@ from dotenv import load_dotenv
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 try:
-    from db_utils import connect_db, get_primary_key, ensure_table_exists, sync_schema_direct
+    from db_utils import connect_db, get_primary_key, ensure_table_exists, sync_schema_direct, get_source_prefix
     from logger import Logger
 except ImportError:
-    from .db_utils import connect_db, get_primary_key, ensure_table_exists, sync_schema_direct
+    from .db_utils import connect_db, get_primary_key, ensure_table_exists, sync_schema_direct, get_source_prefix
     from .logger import Logger
 
 load_dotenv()
@@ -41,7 +41,7 @@ def get_target_pks(conn, table_name, pk_col):
 
 def find_and_queue_missing(src_conn, dst_conn, audit_conn, table_name):
     """Find missing rows and insert them into sync_audit_log."""
-    prefix = "KINGDOM"
+    prefix = get_source_prefix()
     pk_col = get_primary_key(table_name, prefix)
     if not pk_col:
         Logger.error(f"Could not find PK for table {table_name}. Skipping.")
@@ -111,24 +111,20 @@ def inject_to_audit_log(conn, table_name, pks):
         cursor.close()
 
 def run_manual_sync(specific_table=None):
-    prefix = "KINGDOM"
+    prefix = get_source_prefix()
     Logger.info("Starting Manual Differential Sync...")
 
     src_conn = connect_db(prefix, target=False)
     dst_conn = connect_db(prefix, target=True)
     audit_conn = connect_db(prefix, target=False)
 
-    # Ensure sync_audit_log table exists in target database
     from setup_triggers import ensure_audit_log_table
     ensure_audit_log_table(audit_conn)
-
-
 
     try:
         if specific_table:
             tables = [specific_table]
         else:
-            # Fixed: Add prefix parameter to get_monitored_tables
             from setup_triggers import get_monitored_tables
             insert_only = os.getenv(f"{prefix}_INSERT_ONLY", "false").lower() == "true"
             tables = get_monitored_tables(src_conn, prefix=prefix, insert_only=insert_only)
@@ -146,10 +142,9 @@ def run_manual_sync(specific_table=None):
         dst_conn.close()
         audit_conn.close()
 
-
 def force_full_resync(table_name=None):
     """Force full resync by clearing audit log and re-queuing all missing records."""
-    prefix = "KINGDOM"
+    prefix = get_source_prefix()
     Logger.info("Starting FORCE FULL RESYNC...")
     
     src_conn = connect_db(prefix, target=False)
@@ -158,43 +153,33 @@ def force_full_resync(table_name=None):
     
     try:
         cursor = audit_conn.cursor()
-        
         if table_name:
-            # Clear specific table from audit log
-            Logger.info(f"Clearing audit log for table: {table_name}")
             cursor.execute("DELETE FROM dbo.sync_audit_log WHERE table_name = ?", (table_name,))
-            tables = [table_name]
+            Logger.info(f"Cleared existing audit log for table: {table_name}")
+            run_manual_sync(table_name)
         else:
-            # Clear all audit log
-            Logger.info("Clearing entire audit log...")
             cursor.execute("DELETE FROM dbo.sync_audit_log")
+            Logger.info("Cleared entire audit log")
+            run_manual_sync()
             
-            from setup_triggers import get_monitored_tables
-            insert_only = os.getenv(f"{prefix}_INSERT_ONLY", "false").lower() == "true"
-            tables = get_monitored_tables(src_conn, prefix=prefix, insert_only=insert_only)
-        
         audit_conn.commit()
-        Logger.success(f"Cleared audit log for {len(tables)} tables")
-        
-        # Re-queue missing records
-        for table in tables:
-            Logger.process(f"Re-queuing missing records for: {table}")
-            find_and_queue_missing(src_conn, dst_conn, audit_conn, table)
-            
+    except Exception as e:
+        audit_conn.rollback()
+        Logger.error("Force full resync failed", exc=e)
     finally:
+        cursor.close()
         src_conn.close()
-        dst_conn.close() 
+        dst_conn.close()
         audit_conn.close()
-        
-    Logger.success("Force full resync completed!")
 
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Manual Differential Sync for Missing Rows")
     parser.add_argument("--table", help="Specific table to sync (optional)")
+    parser.add_argument("--force", action="store_true", help="Force full resync by clearing existing queued items")
     args = parser.parse_args()
 
-    run_manual_sync(args.table)
-
-
-
+    if args.force:
+        force_full_resync(args.table)
+    else:
+        run_manual_sync(args.table)
