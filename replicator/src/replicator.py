@@ -185,7 +185,7 @@ def start_replicator():
                                     machine_id = get_source_id()
                                     for r in valid_rows:
                                         r['sync_source_id'] = machine_id
-                                    upsert_data_odbc(dst_conn, table, valid_rows, pk_col)
+                                    upsert_data_odbc(dst_conn, table, valid_rows, pk_col, insert_only=config.insert_only)
                                     Logger.info(f"[{machine_id}] Table: {table:<25} | Sync: {len(valid_rows):>4} rows | Status: [OK]", indent=1)
 
                     if log_ids:

@@ -173,7 +173,7 @@ class MultiSourceConfig:
                 errors[source_id] = error_msg
 
         result = ValidationResult(
-            is_valid=False,  # Will be calculated in __post_init__
+            is_valid=False,
             source_results=source_results,
             errors=errors
         )
@@ -212,7 +212,6 @@ class MultiSourceConfig:
         This method checks for changes in the .env file modification time and
         reloads configuration if needed.
         """
-        # Check if .env file has been modified
         env_file_path = ".env"
         current_mtime = 0
 
@@ -223,10 +222,8 @@ class MultiSourceConfig:
             Logger.info("Configuration file changes detected, reloading...")
             self._env_file_mtime = current_mtime
 
-            # Reload environment variables
             load_dotenv(override=True)
 
-            # Reload source configurations
             old_count = len(self._sources)
             self.load_sources()
             new_count = len(self._sources)
@@ -274,7 +271,6 @@ class MultiSourceConfig:
             batch_size = int(os.getenv("KINGDOM_BATCH_SIZE", "500"))
             poll_interval = float(os.getenv("KINGDOM_POLL_INTERVAL", "1.0"))
 
-            # Check for insert-only mode (not in legacy but we include for future compatibility)
             insert_only = os.getenv("KINGDOM_INSERT_ONLY", "false").lower() in ("true", "1", "yes")
 
             return SourceConfig(

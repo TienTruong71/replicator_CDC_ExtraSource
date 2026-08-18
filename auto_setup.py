@@ -1,15 +1,18 @@
-﻿import sys
+import sys
 import os
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'replicator', 'src'))
 
 from db_utils import connect_db, get_source_prefix
+from dotenv import load_dotenv
+from setup_triggers import setup_triggers
+from manual_sync import run_manual_sync
+from replicator import start_replicator
 
 def check_setup_status():
     """Check if system is already set up"""
     try:
-        from dotenv import load_dotenv
         load_dotenv()
 
         conn = connect_db(get_source_prefix(), target=False)
@@ -49,13 +52,10 @@ def auto_setup():
 
         print("System not setup. Starting auto setup...")
 
-        # Step 1: Setup triggers
         print("Step 1: Setting up CDC triggers...")
-        from setup_triggers import setup_triggers
         setup_triggers()
         print("CDC triggers setup completed.")
 
-        # Step 2: Check if we need initial sync
         print("Step 2: Checking if initial sync needed...")
         needs_sync = check_initial_sync_needed()
 
@@ -75,9 +75,6 @@ def auto_setup():
 def check_initial_sync_needed():
     """Check if initial sync is needed by comparing source vs target counts"""
     try:
-        from db_utils import connect_db
-        import os
-
         prefix = get_source_prefix()
         sync_tables = os.getenv(f"{prefix}_SYNC_TABLES", "")
         if not sync_tables:
@@ -129,11 +126,7 @@ def perform_initial_sync():
         print("Starting initial data sync...")
         print("This may take several minutes for large datasets...")
 
-        import os
-        batch_size = int(os.getenv("KINGDOM_BATCH_SIZE", "50000"))
-
         # Run manual sync
-        from manual_sync import run_manual_sync
         run_manual_sync(None)  # Sync all tables
 
         print("Initial sync completed.")
@@ -164,7 +157,6 @@ def auto_run():
     print("=" * 60)
 
     try:
-        from replicator import start_replicator
         start_replicator()
     except KeyboardInterrupt:
         print("\nReplicator stopped by user.")
@@ -176,8 +168,6 @@ def auto_run():
 def show_final_status():
     """Show final system status"""
     try:
-        import os
-
         prefix = get_source_prefix()
         conn = connect_db(prefix, target=False)
         cursor = conn.cursor()

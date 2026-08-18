@@ -114,8 +114,9 @@ def ensure_table_exists(src_conn, dst_conn, table_name: str):
         else:
             col_defs[-1] += " NOT NULL"
 
-    # Add sync_source_id to support multi-source data merging
+    # Add sync_source_id and source_record_id to support multi-source data merging with surrogate keys
     col_defs.append("[sync_source_id] NVARCHAR(50) NULL")
+    col_defs.append("[source_record_id] NVARCHAR(100) NULL")
 
     ddl = f"CREATE TABLE dbo.[{table_name_clean}] (\n    {',\n    '.join(col_defs)}\n);"
 
@@ -195,7 +196,7 @@ def get_primary_key(table_name: str, prefix: str, cursor=None):
 
 
 ##important
-def upsert_data_odbc(dst_conn, table, rows, primary_key):
+def upsert_data_odbc(dst_conn, table, rows, primary_key, insert_only=False):
     """
     Safe UPSERT for SQL Server via ODBC.
     Auto-casts data to correct SQL types to prevent ODBC 07006 errors.
@@ -273,14 +274,29 @@ def upsert_data_odbc(dst_conn, table, rows, primary_key):
 
         columns = list(rows[0].keys())
 
-        if identity_cols:
+        pk_col = (primary_key or columns[0]).lower()
+
+        if insert_only:
+            # Preserve original source ID into source_record_id BEFORE stripping identity columns
+            for row in rows:
+                # Need to use the exact case from the row keys if it differs, but get() is safe if we use original case
+                original_pk_key = primary_key or columns[0]
+                if original_pk_key in row:
+                    row['source_record_id'] = str(row[original_pk_key])
+
+            if identity_cols:
+                Logger.info(f"Insert-only mode: stripping identity columns {identity_cols} for auto-generation")
+                rows = [{k: v for k, v in row.items() if k not in identity_cols} for row in rows]
+                
+            columns = list(rows[0].keys())
+
+        if identity_cols and not insert_only:
             try:
                 cursor.execute(f"SET IDENTITY_INSERT {table_full} ON")
             except Exception as e:
                 Logger.warn(f"Failed to SET IDENTITY_INSERT ON for {table_full}: {e}")
 
         try:
-            pk_col = (primary_key or columns[0]).lower()
             update_params = []
             insert_params = []
 
@@ -311,35 +327,39 @@ def upsert_data_odbc(dst_conn, table, rows, primary_key):
                 pk_val = row.get(pk_col)
                 pks_in_batch.append(str(pk_val))
 
-            existing_pks = set()
-            chunk_size_check = 1000
-            for i in range(0, len(pks_in_batch), chunk_size_check):
-                chunk = pks_in_batch[i : i + chunk_size_check]
-                placeholders_pk = ", ".join(["?" for _ in chunk])
-                
-                if has_source_id:
-                    # Assuming batch belongs to the same source
-                    source_id_val = rows[0].get('sync_source_id')
-                    check_query = f"SELECT [{pk_col}] FROM {table_full} WHERE [{pk_col}] IN ({placeholders_pk}) AND [sync_source_id] = ?"
-                    cursor.execute(check_query, tuple(chunk) + (source_id_val,))
-                else:
-                    check_query = f"SELECT [{pk_col}] FROM {table_full} WHERE [{pk_col}] IN ({placeholders_pk})"
-                    cursor.execute(check_query, tuple(chunk))
-                existing_pks.update({str(r[0]) for r in cursor.fetchall()})
-
-            for row in rows:
-                pk_val = row.get(pk_col)
-                str_pk = str(pk_val)
-
-                if str_pk in existing_pks:
-                    update_values = [row.get(c) for c in update_cols]
-                    if has_source_id:
-                        update_params.append(tuple(update_values + [pk_val, row.get('sync_source_id')]))
-                    else:
-                        update_params.append(tuple(update_values + [pk_val]))
-                else:
+            if insert_only:
+                for row in rows:
                     insert_values = [row.get(c) for c in columns]
                     insert_params.append(tuple(insert_values))
+            else:
+                existing_pks = set()
+                chunk_size_check = 1000
+                for i in range(0, len(pks_in_batch), chunk_size_check):
+                    chunk = pks_in_batch[i : i + chunk_size_check]
+                    placeholders_pk = ", ".join(["?" for _ in chunk])
+                    
+                    if has_source_id:
+                        source_id_val = rows[0].get('sync_source_id')
+                        check_query = f"SELECT [{pk_col}] FROM {table_full} WHERE [{pk_col}] IN ({placeholders_pk}) AND [sync_source_id] = ?"
+                        cursor.execute(check_query, tuple(chunk) + (source_id_val,))
+                    else:
+                        check_query = f"SELECT [{pk_col}] FROM {table_full} WHERE [{pk_col}] IN ({placeholders_pk})"
+                        cursor.execute(check_query, tuple(chunk))
+                    existing_pks.update({str(r[0]) for r in cursor.fetchall()})
+
+                for row in rows:
+                    pk_val = row.get(pk_col)
+                    str_pk = str(pk_val)
+
+                    if str_pk in existing_pks:
+                        update_values = [row.get(c) for c in update_cols]
+                        if has_source_id:
+                            update_params.append(tuple(update_values + [pk_val, row.get('sync_source_id')]))
+                        else:
+                            update_params.append(tuple(update_values + [pk_val]))
+                    else:
+                        insert_values = [row.get(c) for c in columns]
+                        insert_params.append(tuple(insert_values))
 
             num_columns = len(columns)
             dml_chunk_size = max(10, 2000 // (num_columns + 1))
@@ -463,9 +483,11 @@ def sync_schema_direct(src_conn, dst_conn, schema, table):
         if col not in dst_cols:
             sql_updates.append(f"ALTER TABLE [{schema}].[{table}] ADD [{col}] {to_sql_type(meta)}")
 
-    # Ensure sync_source_id exists for multi-source
+    # Ensure sync_source_id and source_record_id exist for multi-source
     if 'sync_source_id' not in dst_cols:
         sql_updates.append(f"ALTER TABLE [{schema}].[{table}] ADD [sync_source_id] NVARCHAR(50) NULL")
+    if 'source_record_id' not in dst_cols:
+        sql_updates.append(f"ALTER TABLE [{schema}].[{table}] ADD [source_record_id] NVARCHAR(100) NULL")
 
     if not sql_updates:
         return

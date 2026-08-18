@@ -51,7 +51,12 @@ def find_and_queue_missing(src_conn, dst_conn, audit_conn, table_name):
     table_clean = table_name.replace('[', '').replace(']', '').replace('dbo.', '')
     sync_schema_direct(src_conn, dst_conn, "dbo", table_clean)
 
-    target_pks = get_target_pks(dst_conn, table_name, pk_col)
+    insert_only = os.getenv(f"{prefix}_INSERT_ONLY", "false").lower() in ("true", "1", "yes", "on")
+    if insert_only:
+        Logger.info(f"Insert-only mode active: Queueing all source records for deduplication check...")
+        target_pks = set()
+    else:
+        target_pks = get_target_pks(dst_conn, table_name, pk_col)
 
     src_cursor = src_conn.cursor()
     table_clean = table_name.replace('[', '').replace(']', '').replace('dbo.', '')

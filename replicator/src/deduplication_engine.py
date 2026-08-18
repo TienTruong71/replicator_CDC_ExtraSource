@@ -525,8 +525,8 @@ def create_deduplication_engine(config: Dict[str, Any] = None) -> DeduplicationE
     """
     config = config or {}
 
-    cache_size = config.get('cache_size_limit', 1000000)  # 1M default
-    cache_ttl = config.get('cache_ttl_seconds', 3600)     # 1 hour default
+    cache_size = config.get('cache_size_limit', 1000000)
+    cache_ttl = config.get('cache_ttl_seconds', 3600)
 
     return DeduplicationEngine(cache_size_limit=cache_size, cache_ttl_seconds=cache_ttl)
 
