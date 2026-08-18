@@ -1,4 +1,4 @@
-﻿"""
+"""
 Build script to create CDC_Replicator.exe
 This replaces the old executable with our new multi-source version
 """
@@ -140,6 +140,7 @@ def create_simple_build():
             '--add-data', 'replicator/src;replicator/src',
             '--hidden-import', 'pyodbc',
             '--hidden-import', 'dotenv',
+            '--hidden-import', 'uuid',
             '--console',
             'auto_setup.py'
         ]

@@ -302,13 +302,13 @@ class MultiSourceConfig:
         """
         prefix = prefix.upper()
 
-        # Required parameters
+        
         host = os.getenv(f"{prefix}_SQLSERVER_HOST")
         database = os.getenv(f"{prefix}_SQLSERVER_DB")
         username = os.getenv(f"{prefix}_SQLSERVER_USER")
         password = os.getenv(f"{prefix}_SQLSERVER_PASS", "")
 
-        # Optional parameters with defaults
+        
         port_str = os.getenv(f"{prefix}_SQLSERVER_PORT", "1433")
         try:
             from db_utils import get_source_id
@@ -319,7 +319,7 @@ class MultiSourceConfig:
         poll_interval_str = os.getenv(f"{prefix}_POLL_INTERVAL", "1.0")
         insert_only_str = os.getenv(f"{prefix}_INSERT_ONLY", "false")
 
-        # Validate required parameters
+        
         if not host:
             Logger.error(f"Missing required parameter: {prefix}_SQLSERVER_HOST")
             return None
@@ -332,7 +332,7 @@ class MultiSourceConfig:
             Logger.error(f"Missing required parameter: {prefix}_SQLSERVER_USER")
             return None
 
-        # Parse and validate optional parameters
+        
         try:
             port = int(port_str)
             if port <= 0:
@@ -360,7 +360,7 @@ class MultiSourceConfig:
             Logger.error(f"Invalid poll_interval format for {prefix}: {poll_interval_str}")
             return None
 
-        # Parse insert_only flag
+        
         insert_only = insert_only_str.lower() in ("true", "1", "yes", "on")
 
         return SourceConfig(

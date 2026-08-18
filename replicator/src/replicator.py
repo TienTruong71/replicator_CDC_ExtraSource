@@ -175,10 +175,13 @@ def start_replicator():
                             rows = fetch_rows_by_pks(src_conn, "dbo", table, pk_col, list(upsert_pks))
                             if rows:
                                 valid_rows = []
+                                valid_hashes = []
                                 for row in rows:
                                     if config.insert_only:
-                                        if dedup_engine.is_duplicate(table, row, source_id):
+                                        is_dup, row_hash = dedup_engine.is_duplicate(table, row, source_id)
+                                        if is_dup:
                                             continue
+                                        valid_hashes.append(row_hash)
                                     valid_rows.append(row)
 
                                 if valid_rows:
@@ -186,6 +189,9 @@ def start_replicator():
                                     for r in valid_rows:
                                         r['sync_source_id'] = machine_id
                                     upsert_data_odbc(dst_conn, table, valid_rows, pk_col, insert_only=config.insert_only)
+                                    if config.insert_only:
+                                        for h in valid_hashes:
+                                            dedup_engine.mark_processed(table, h, source_id)
                                     Logger.info(f"[{machine_id}] Table: {table:<25} | Sync: {len(valid_rows):>4} rows | Status: [OK]", indent=1)
 
                     if log_ids:

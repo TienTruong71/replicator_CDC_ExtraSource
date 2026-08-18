@@ -93,7 +93,7 @@ def setup_single_table(conn, table: str, insert_only: bool = False) -> bool:
             except Exception as e:
                 Logger.warn(f"Warning dropping old trigger for {table}: {e}", indent=1)
 
-#fetch trigger update and insert
+
         cursor.execute(f"""
         CREATE TRIGGER dbo.[trig_cdc_{clean_table}_INS] ON dbo.[{table}] AFTER INSERT AS
         BEGIN
@@ -134,7 +134,7 @@ def ensure_audit_log_table(conn):
     cursor = conn.cursor()
     Logger.info("Ensuring dbo.sync_audit_log exists with multi-source columns...")
 
-    # Create the table with basic structure if it doesn't exist
+    
     cursor.execute("""
     IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'sync_audit_log' AND schema_id = SCHEMA_ID('dbo'))
     CREATE TABLE dbo.sync_audit_log (
@@ -146,7 +146,7 @@ def ensure_audit_log_table(conn):
     );
     """)
 
-    # Add status column if it doesn't exist (backward compatibility)
+    
     cursor.execute("""
     IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID('dbo.sync_audit_log') AND name = 'status')
     BEGIN
@@ -155,7 +155,7 @@ def ensure_audit_log_table(conn):
     END
     """)
 
-    # Add processed_at column if it doesn't exist
+    
     cursor.execute("""
     IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID('dbo.sync_audit_log') AND name = 'processed_at')
     BEGIN
@@ -164,7 +164,7 @@ def ensure_audit_log_table(conn):
     END
     """)
 
-    # Add source_id column if it doesn't exist
+    
     cursor.execute("""
     IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID('dbo.sync_audit_log') AND name = 'source_id')
     BEGIN
@@ -173,7 +173,7 @@ def ensure_audit_log_table(conn):
     END
     """)
 
-    # Add content_hash column if it doesn't exist
+    
     cursor.execute("""
     IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID('dbo.sync_audit_log') AND name = 'content_hash')
     BEGIN
@@ -182,25 +182,25 @@ def ensure_audit_log_table(conn):
     END
     """)
 
-    # Create indexes for efficient queries
+    
     cursor.execute("""
     IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'IX_sync_audit_log_table' AND object_id = OBJECT_ID('dbo.sync_audit_log'))
     CREATE INDEX IX_sync_audit_log_table ON dbo.sync_audit_log (table_name);
     """)
 
-    # Index for status-based queries (primary index for multi-source processing)
+    
     cursor.execute("""
     IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'IX_sync_audit_log_status' AND object_id = OBJECT_ID('dbo.sync_audit_log'))
     CREATE INDEX IX_sync_audit_log_status ON dbo.sync_audit_log (status, log_id);
     """)
 
-    # Index for content hash lookups (deduplication)
+    
     cursor.execute("""
     IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'IX_sync_audit_log_hash' AND object_id = OBJECT_ID('dbo.sync_audit_log'))
     CREATE INDEX IX_sync_audit_log_hash ON dbo.sync_audit_log (content_hash) WHERE content_hash IS NOT NULL;
     """)
 
-    # Index for source-specific queries
+    
     cursor.execute("""
     IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'IX_sync_audit_log_source' AND object_id = OBJECT_ID('dbo.sync_audit_log'))
     CREATE INDEX IX_sync_audit_log_source ON dbo.sync_audit_log (source_id, created_at) WHERE source_id IS NOT NULL;
@@ -281,7 +281,7 @@ def auto_discover_new_tables(conn, prefix: str, insert_only: bool = False):
         allowed_tables = [t.strip() for t in sync_tables.split(",")]
         all_tables = [t for t in all_tables if t in allowed_tables]
 
-    # In insert-only mode, we only expect 1 trigger (_INS). Otherwise >= 2.
+    
     expected_count = 1 if insert_only else 2
     
     cursor.execute(f"""

@@ -15,22 +15,23 @@ class SimpleColumnValidator:
         try:
             print(f"[INFO] Validating table: {table_name} (columns only)")
 
-            # Get source columns
+            
             src_columns = self._get_column_names(src_conn, table_name)
             if not src_columns:
                 self.issues.append(f"{table_name}: Source table not found or has no columns")
                 return False
 
-            # Get target columns
+            
             dst_columns = self._get_column_names(dst_conn, table_name)
             if not dst_columns:
                 self.issues.append(f"{table_name}: Target table not found or has no columns")
                 return False
 
-            # Ignore 'sync_source_id' which is added automatically by the replicator
-            dst_columns = [c for c in dst_columns if c != 'sync_source_id']
+            
+            TOOL_COLUMNS = {'sync_source_id', 'source_record_id'}
+            dst_columns = [c for c in dst_columns if c not in TOOL_COLUMNS]
 
-            # Check column count
+            
             if len(src_columns) != len(dst_columns):
                 self.issues.append(f"{table_name}: Column count mismatch - Source: {len(src_columns)}, Target: {len(dst_columns)}")
                 print(f"[ERROR] {table_name}: Column count mismatch")
@@ -38,7 +39,7 @@ class SimpleColumnValidator:
                 print(f"[ERROR]    TARGET: {len(dst_columns)} columns (excluding sync_source_id)")
                 return False
 
-            # Check column names match
+            
             src_set = set(src_columns)
             dst_set = set(dst_columns)
 
@@ -69,7 +70,7 @@ class SimpleColumnValidator:
         try:
             cursor = conn.cursor()
 
-            # Get column names only
+            
             cursor.execute(f"""
                 SELECT COLUMN_NAME
                 FROM INFORMATION_SCHEMA.COLUMNS

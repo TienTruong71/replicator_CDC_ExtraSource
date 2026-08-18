@@ -92,20 +92,22 @@ def check_initial_sync_needed():
 
         for table in tables:
             try:
-                # Source count
+
                 src_cursor.execute(f"SELECT COUNT(*) FROM [{table}]")
                 src_count = src_cursor.fetchone()[0]
 
-                # Target count
+
                 try:
                     dst_cursor.execute(f"SELECT COUNT(*) FROM [{table}]")
                     dst_count = dst_cursor.fetchone()[0]
                 except:
                     dst_count = 0
 
-                print(f"Table {table}: Source={src_count:,}, Target={dst_count:,}")
-
-                if src_count > dst_count:
+                insert_only = os.getenv(f"{prefix}_INSERT_ONLY", "false").lower() in ("true", "1", "yes", "on")
+                if insert_only:
+                    print(f"Table {table}: Source={src_count:,} [INSERT_ONLY mode - will queue all for dedup check]")
+                    needs_sync = True
+                elif src_count > dst_count:
                     needs_sync = True
 
             except Exception as e:
@@ -126,8 +128,8 @@ def perform_initial_sync():
         print("Starting initial data sync...")
         print("This may take several minutes for large datasets...")
 
-        # Run manual sync
-        run_manual_sync(None)  # Sync all tables
+
+        run_manual_sync(None)
 
         print("Initial sync completed.")
 
@@ -140,18 +142,18 @@ def auto_run():
     print("Multi-Source CDC Replicator - Auto Setup & Run")
     print("=" * 60)
 
-    # Step 1: Auto setup if needed
+
     setup_success = auto_setup()
     if not setup_success:
         print("Setup failed. Cannot continue.")
         return False
 
-    # Step 2: Show final status
+
     print("\nFinal Status Check:")
     print("-" * 30)
     show_final_status()
 
-    # Step 3: Start replicator
+
     print("\nStarting continuous replicator...")
     print("Press Ctrl+C to stop")
     print("=" * 60)
@@ -179,7 +181,7 @@ def show_final_status():
         trigger_count = cursor.fetchone()[0]
         print(f"CDC Triggers: {trigger_count}")
 
-        # Show data comparison
+
         sync_tables = os.getenv(f"{prefix}_SYNC_TABLES", "")
         if sync_tables:
             tables = [t.strip() for t in sync_tables.split(",")]

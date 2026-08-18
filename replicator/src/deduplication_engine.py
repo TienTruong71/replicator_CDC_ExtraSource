@@ -57,15 +57,14 @@ class DeduplicationEngine:
         self.logger = Logger
         self._cache_lock = RLock()
 
-        # Memory cache configuration
+        
         self.cache_size_limit = cache_size_limit
         self.cache_ttl_seconds = cache_ttl_seconds
 
-        # LRU cache implementation using OrderedDict
-        # Format: hash_key -> (timestamp, source_id, table_name)
+        
         self._cache: OrderedDict[str, tuple[float, str, str]] = OrderedDict()
 
-        # Statistics
+        
         self._cache_hits = 0
         self._cache_misses = 0
         self._database_hits = 0
@@ -75,7 +74,7 @@ class DeduplicationEngine:
         self.logger.info("DeduplicationEngine initialized with cache limit: {}, TTL: {}s".format(
             cache_size_limit, cache_ttl_seconds))
 
-    def is_duplicate(self, table: str, record: Dict[str, Any], source_id: str) -> bool:
+    def is_duplicate(self, table: str, record: Dict[str, Any], source_id: str) -> tuple[bool, str]:
         """
         Check if a record is a duplicate based on content hash.
 
@@ -96,54 +95,52 @@ class DeduplicationEngine:
         """
         if not record:
             self.logger.warn(f"Empty record provided for duplicate check in {table}")
-            return False
+            return False, ""
 
         try:
-            # Compute content hash
+            
             record_hash = self.hasher.compute_hash(record, table)
 
             with self._cache_lock:
                 self._total_checks += 1
 
-                # Check memory cache first
+                
                 cache_key = f"{table}:{record_hash}"
 
                 if self._check_memory_cache(cache_key):
                     self._cache_hits += 1
                     self._duplicates_found += 1
 
-                    # Move to end for LRU behavior
+                    
                     cached_data = self._cache.pop(cache_key)
                     self._cache[cache_key] = cached_data
 
                     original_source = cached_data[1]
                     self.logger.info(f"Duplicate detected in cache: {table} (hash: {record_hash[:12]}...) "
                                    f"from {source_id}, originally from {original_source}")
-                    return True
+                    return True, record_hash
 
                 self._cache_misses += 1
 
-            # Check persistent storage
+            
             if self._check_database_storage(table, record_hash, source_id):
                 self._database_hits += 1
                 self._duplicates_found += 1
 
-                # Add to cache for future lookups
+                
                 self._add_to_cache(cache_key, source_id, table)
 
                 self.logger.info(f"Duplicate detected in database: {table} (hash: {record_hash[:12]}...) "
                                f"from {source_id}")
-                return True
+                return True, record_hash
 
-            # Not a duplicate - record this hash for future checks
-            self.mark_processed(table, record_hash, source_id)
-
-            return False
+            
+            # self.mark_processed(table, record_hash, source_id)  # Moved to after upsert
+            return False, record_hash
 
         except Exception as e:
             self.logger.error(f"Error checking duplicate for {table} from {source_id}", exc=e)
-            # On error, allow the record through to avoid blocking valid data
-            return False
+            return False, ""
 
     def mark_processed(self, table: str, record_hash: str, source_id: str) -> None:
         """
@@ -155,15 +152,14 @@ class DeduplicationEngine:
             source_id: Identifier of the source database
         """
         try:
-            # Add to memory cache
+            
             cache_key = f"{table}:{record_hash}"
             self._add_to_cache(cache_key, source_id, table)
 
-            # Store in persistent database
+            
             self._store_in_database(table, record_hash, source_id)
 
-            # self.logger.debug(f"Marked as processed: {table} (hash: {record_hash[:12]}...) from {source_id}")
-
+            
         except Exception as e:
             self.logger.error(f"Failed to mark record as processed: {table} from {source_id}", exc=e)
 
@@ -185,21 +181,20 @@ class DeduplicationEngine:
         try:
             self.logger.info(f"Starting cleanup: removing entries older than {retention_days} days")
 
-            # Calculate cutoff date
+            
             cutoff_date = datetime.now() - timedelta(days=retention_days)
             cutoff_str = cutoff_date.strftime('%Y-%m-%d %H:%M:%S')
 
-            # First, ensure the deduplication tracker table exists
+            
             self._ensure_dedup_tracker_table()
 
-            # Try to get a database connection (we'll use KINGDOM prefix as fallback)
-            # In a real deployment, this should use the target database connection
+            
             conn = None
             try:
                 conn = connect_db(get_source_prefix(), target=True)
                 cursor = conn.cursor()
 
-                # Clean up old deduplication tracker entries
+                
                 try:
                     cursor.execute("""
                         DELETE FROM dbo.sync_dedup_tracker
@@ -211,7 +206,7 @@ class DeduplicationEngine:
                     errors += 1
                     self.logger.error("Failed to cleanup deduplication tracker entries", exc=e)
 
-                # Clean up old processed audit log entries (optional, based on requirements)
+                
                 try:
                     cursor.execute("""
                         DELETE FROM dbo.sync_audit_log
@@ -386,7 +381,7 @@ class DeduplicationEngine:
                 result = cursor.fetchone()
                 if result:
                     original_source, created_at = result
-                    # Duplicate found in database (debug log removed)
+                    
 
                     cursor.execute("""
                         UPDATE dbo.sync_dedup_tracker
@@ -512,7 +507,6 @@ class DeduplicationEngine:
             raise
 
 
-
 def create_deduplication_engine(config: Dict[str, Any] = None) -> DeduplicationEngine:
     """
     Factory function to create a configured DeduplicationEngine instance.
@@ -541,7 +535,7 @@ def validate_deduplication_setup() -> bool:
     try:
         engine = DeduplicationEngine()
         test_record = {'id': 1, 'name': 'test'}
-        test_result = engine.is_duplicate('test_table', test_record, 'TEST_SOURCE')
+        test_result, _ = engine.is_duplicate('test_table', test_record, 'TEST_SOURCE')
 
         Logger.success("Deduplication engine validation passed")
         return True
@@ -549,5 +543,4 @@ def validate_deduplication_setup() -> bool:
     except Exception as e:
         Logger.error("Deduplication engine validation failed", exc=e)
         return False
-
 
