@@ -47,12 +47,12 @@ def test_connections():
         prefix = get_source_prefix()
         print(f"[INFO] Using source prefix: {prefix}")
 
-        # Test source connection
+        
         src_conn = connect_db(prefix, target=False)
         print("[OK] Source database connected")
         src_conn.close()
 
-        # Test target connection
+        
         dst_conn = connect_db(prefix, target=True)
         print("[OK] Target database connected")
         dst_conn.close()
@@ -99,7 +99,7 @@ def validate_schemas():
         from db_utils import connect_db
         import os
 
-        # Get configured tables
+        
         prefix = get_source_prefix()
         sync_tables = os.getenv(f"{prefix}_SYNC_TABLES", "")
         if not sync_tables:
@@ -109,11 +109,11 @@ def validate_schemas():
         tables = [t.strip() for t in sync_tables.split(",")]
         print(f"[INFO] Tables to validate: {', '.join(tables)}")
 
-        # Connect to databases
-        src_conn = connect_db(prefix, target=False)  # Source
-        dst_conn = connect_db(prefix, target=True)   # Target
+        
+        src_conn = connect_db(prefix, target=False)  
+        dst_conn = connect_db(prefix, target=True)   
 
-        # Validate each table
+        
         validator = SimpleColumnValidator()
         all_compatible = True
 
@@ -122,7 +122,7 @@ def validate_schemas():
             if not validator.validate_table(src_conn, dst_conn, table_name):
                 all_compatible = False
 
-        # Cleanup
+        
         src_conn.close()
         dst_conn.close()
 
@@ -145,7 +145,7 @@ def check_audit_log_status():
     try:
         from db_utils import connect_db
 
-        conn = connect_db(get_source_prefix(), target=False)  # Audit_log at source DB
+        conn = connect_db(get_source_prefix(), target=False)  
         cursor = conn.cursor()
 
         cursor.execute("SELECT COUNT(*) FROM sync_audit_log WHERE status = 'pending'")
@@ -177,7 +177,7 @@ def perform_initial_sync():
 
         start_time = time.time()
 
-        # Run sync for all configured tables
+        
         run_manual_sync(None)
 
         duration = time.time() - start_time
@@ -195,28 +195,28 @@ def main():
     print("="*70)
     print(f"Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-    # Step 1: Dependencies
+    
     print("\n[STEP 1] Checking dependencies...")
     if not check_dependencies():
         print("\n[FATAL] Dependencies check failed!")
         input("Press Enter to exit...")
         return False
 
-    # Step 2: Connections
+    
     print("\n[STEP 2] Testing connections...")
     if not test_connections():
         print("\n[FATAL] Connection test failed!")
         input("Press Enter to exit...")
         return False
 
-    # Step 3: System setup
+    
     print("\n[STEP 3] Checking CDC setup...")
     if not check_system_setup():
         print("\n[FATAL] CDC setup incomplete!")
         input("Press Enter to exit...")
         return False
 
-    # Step 4: Schema validation
+    
     print("\n[STEP 4] Validating schemas...")
     if not validate_schemas():
         print("\n[FATAL] Schema validation failed!")
@@ -224,14 +224,14 @@ def main():
         input("Press Enter to exit...")
         return False
 
-    # Step 5: Running initial sync
+    
     print("\n[STEP 5] Running initial sync...")
     if not perform_initial_sync():
         print("\n[FATAL] Initial sync failed!")
         input("Press Enter to exit...")
         return False
 
-    # Step 6: Final status
+    
     pending, processed = check_audit_log_status()
 
     print("\n" + "="*70)
@@ -249,7 +249,7 @@ def main():
 
     print(f"\nCompleted: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-    # Windows compatible auto-close
+    
     print("\nPress any key to exit...")
 
     import msvcrt
@@ -278,7 +278,4 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"\n[FATAL] Unexpected error: {e}")
         input("Press Enter to exit...")
-
-
-
 

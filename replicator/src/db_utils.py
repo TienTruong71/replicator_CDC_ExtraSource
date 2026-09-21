@@ -114,7 +114,7 @@ def ensure_table_exists(src_conn, dst_conn, table_name: str):
         else:
             col_defs[-1] += " NOT NULL"
 
-    # Add sync_source_id and source_record_id to support multi-source data merging with surrogate keys
+
     col_defs.append("[sync_source_id] NVARCHAR(50) NULL")
     col_defs.append("[source_record_id] NVARCHAR(100) NULL")
 
@@ -194,8 +194,6 @@ def get_primary_key(table_name: str, prefix: str, cursor=None):
     return row[0] if row else None
 
 
-
-##important
 def upsert_data_odbc(dst_conn, table, rows, primary_key, insert_only=False):
     """
     Safe UPSERT for SQL Server via ODBC.
@@ -249,7 +247,7 @@ def upsert_data_odbc(dst_conn, table, rows, primary_key, insert_only=False):
         cursor = dst_conn.cursor()
         cursor.fast_executemany = True
 
-        # Step 1: detect identity columns
+
         cursor.execute(f"""
             SELECT c.name
             FROM sys.columns c
@@ -259,7 +257,7 @@ def upsert_data_odbc(dst_conn, table, rows, primary_key, insert_only=False):
         id_cols_res = cursor.fetchall()
         identity_cols = {r[0].lower() for r in id_cols_res} if id_cols_res else set()
 
-        # Step 2: detect computed + timestamp columns and strip them from rows EARLY
+
         cursor.execute(f"""
             SELECT COLUMN_NAME
             FROM INFORMATION_SCHEMA.COLUMNS
@@ -277,9 +275,9 @@ def upsert_data_odbc(dst_conn, table, rows, primary_key, insert_only=False):
         pk_col = (primary_key or columns[0]).lower()
 
         if insert_only:
-            # Preserve original source ID into source_record_id BEFORE stripping identity columns
+
             for row in rows:
-                # Need to use the exact case from the row keys if it differs, but get() is safe if we use original case
+
                 original_pk_key = primary_key or columns[0]
                 if original_pk_key in row:
                     row['source_record_id'] = str(row[original_pk_key])
@@ -287,7 +285,7 @@ def upsert_data_odbc(dst_conn, table, rows, primary_key, insert_only=False):
             if identity_cols:
                 Logger.info(f"Insert-only mode: stripping identity columns {identity_cols} for auto-generation")
                 rows = [{k: v for k, v in row.items() if k not in identity_cols} for row in rows]
-                
+
             columns = list(rows[0].keys())
 
         if identity_cols and not insert_only:
@@ -337,7 +335,7 @@ def upsert_data_odbc(dst_conn, table, rows, primary_key, insert_only=False):
                 for i in range(0, len(pks_in_batch), chunk_size_check):
                     chunk = pks_in_batch[i : i + chunk_size_check]
                     placeholders_pk = ", ".join(["?" for _ in chunk])
-                    
+
                     if has_source_id:
                         source_id_val = rows[0].get('sync_source_id')
                         check_query = f"SELECT [{pk_col}] FROM {table_full} WHERE [{pk_col}] IN ({placeholders_pk}) AND [sync_source_id] = ?"
@@ -415,13 +413,13 @@ def upsert_data_odbc(dst_conn, table, rows, primary_key, insert_only=False):
                         for j in range(0, len(chunk), sub_chunk_size):
                             sub_chunk = chunk[j:j+sub_chunk_size]
                             v_placeholders = ", ".join(["(" + ", ".join(["?"] * len(columns)) + ")"] * len(sub_chunk))
-                            # sub_chunk contains tuples - flatten correctly
+
                             f_params = [val for row_tuple in sub_chunk for val in row_tuple]
                             try:
                                 cursor.execute(f"INSERT INTO {table_full} ({col_list}) VALUES {v_placeholders}", f_params)
                             except Exception as sub_error:
                                 Logger.error(f"Batch insert failed in {table}, trying final row-by-row fallback...", exc=sub_error)
-                                # Create a fresh cursor to avoid corrupted state from batch failure
+
                                 fallback_cursor = dst_conn.cursor()
                                 if identity_cols:
                                     try:
@@ -461,7 +459,6 @@ def upsert_data_odbc(dst_conn, table, rows, primary_key, insert_only=False):
         Logger.error(f"Upsert failed for {table} — skipping this batch to avoid crash", exc=e)
 
 
-
 def sync_schema_direct(src_conn, dst_conn, schema, table):
     src_cursor = src_conn.cursor()
     dst_cursor = dst_conn.cursor()
@@ -483,7 +480,7 @@ def sync_schema_direct(src_conn, dst_conn, schema, table):
         if col not in dst_cols:
             sql_updates.append(f"ALTER TABLE [{schema}].[{table}] ADD [{col}] {to_sql_type(meta)}")
 
-    # Ensure sync_source_id and source_record_id exist for multi-source
+
     if 'sync_source_id' not in dst_cols:
         sql_updates.append(f"ALTER TABLE [{schema}].[{table}] ADD [sync_source_id] NVARCHAR(50) NULL")
     if 'source_record_id' not in dst_cols:

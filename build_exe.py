@@ -94,7 +94,6 @@ def build_executable():
         print("Building CDC_Replicator.exe...")
         print("This may take several minutes...")
         
-        # Build using spec file
         cmd = [
             sys.executable, '-m', 'PyInstaller',
             '--clean',
@@ -107,7 +106,6 @@ def build_executable():
         if result.returncode == 0:
             print("Build completed successfully!")
             
-            # Check if exe exists
             exe_path = os.path.join('dist', 'CDC_Replicator.exe')
             if os.path.exists(exe_path):
                 file_size = os.path.getsize(exe_path) / (1024*1024)  # MB
@@ -165,17 +163,14 @@ def main():
     print("CDC Replicator - Build to Executable")
     print("=" * 60)
     
-    # Check current directory
     if not os.path.exists('auto_setup.py'):
         print("ERROR: auto_setup.py not found")
         print("Please run this from the tool_sync_dimenson_extra directory")
         return False
     
-    # Install PyInstaller
     if not install_pyinstaller():
         return False
     
-    # Try simple build first
     print("\nAttempting simple build...")
     if create_simple_build():
         print("\n" + "=" * 60)
@@ -195,7 +190,6 @@ def main():
         print("  - Performance optimizations")
         return True
     
-    # If simple build fails, try advanced build
     print("\nSimple build failed, trying advanced build...")
     create_spec_file()
     

@@ -71,11 +71,11 @@ class ContentHasher:
 
             json_str = json.dumps(normalized_record, sort_keys=True, separators=(',', ':'))
 
-            # Compute SHA-256 hash
+            
             hash_obj = hashlib.sha256(json_str.encode('utf-8'))
             content_hash = hash_obj.hexdigest()
 
-            # Log hash computation (only in verbose mode to avoid spam)
+            
             return content_hash
 
         except Exception as e:
@@ -96,12 +96,12 @@ class ContentHasher:
         excluded_count = 0
 
         for key, value in record.items():
-            # Case-insensitive metadata column check
+            
             if key.lower() in self.METADATA_COLUMNS:
                 excluded_count += 1
                 continue
 
-            # Also exclude columns ending with common metadata suffixes
+            
             key_lower = key.lower()
             if (key_lower.endswith('_at') or
                 key_lower.endswith('_time') or
@@ -112,7 +112,7 @@ class ContentHasher:
 
             cleaned[key] = value
 
-        # Log excluded columns only if significant number
+        
         if excluded_count > 2:
             self.logger.info(f"Excluded {excluded_count} metadata columns from hash")
 
@@ -131,18 +131,18 @@ class ContentHasher:
         if value is None:
             return None
 
-        # Handle string values
+        
         if isinstance(value, str):
-            # Strip whitespace and convert to lowercase for consistency
+            
             normalized = value.strip().lower()
             return normalized if normalized else None
 
-        # Handle numeric types
+        
         if isinstance(value, (int, bool)):
             return value
 
         if isinstance(value, float):
-            # Handle special float values
+            
             if str(value).lower() in ('nan', 'inf', '-inf'):
                 return str(value).lower()
             return value
@@ -150,28 +150,28 @@ class ContentHasher:
         if isinstance(value, Decimal):
             return float(value)
 
-        # Handle date/datetime objects
+        
         if isinstance(value, (datetime, date)):
-            # Convert to ISO format string for consistency
+            
             return value.isoformat()
 
-        # Handle bytes
+        
         if isinstance(value, bytes):
             try:
                 return value.decode('utf-8').strip().lower()
             except UnicodeDecodeError:
-                # For binary data, use hex representation
+                
                 return value.hex().lower()
 
-        # Handle lists and tuples
+        
         if isinstance(value, (list, tuple)):
             return [self.normalize_value(item) for item in value]
 
-        # Handle dictionaries (nested records)
+        
         if isinstance(value, dict):
             return {k: self.normalize_value(v) for k, v in value.items()}
 
-        # For any other type, convert to string and normalize
+        
         return str(value).strip().lower()
 
     def _normalize_record(self, record: Dict[str, Any]) -> Dict[str, Any]:
@@ -187,11 +187,11 @@ class ContentHasher:
         normalized = {}
 
         for key, value in record.items():
-            # Normalize the key as well (case-insensitive, stripped)
+            
             normalized_key = key.strip().lower()
             normalized_value = self.normalize_value(value)
 
-            # Only include non-None values to reduce hash variation
+            
             if normalized_value is not None:
                 normalized[normalized_key] = normalized_value
 
