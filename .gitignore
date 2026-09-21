@@ -149,3 +149,7 @@ dmypy.json
 # **/cdc_src/**
 
 CDC_Tool.sln
+
+# AI assistant files (local only)
+CLAUDE.md
+.kiro/
