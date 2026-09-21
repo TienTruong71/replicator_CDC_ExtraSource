@@ -5,6 +5,7 @@ import pyodbc
 from datetime import datetime, date
 import time
 from decimal import Decimal
+import uuid
 
 try:
     from logger import Logger
@@ -225,7 +226,6 @@ def upsert_data_odbc(dst_conn, table, rows, primary_key, insert_only=False):
             if k in datetime_columns:
                 record[k] = convert_datetime(record[k])
 
-            import uuid
             if isinstance(record[k], uuid.UUID):
                 record[k] = str(record[k]).upper()
 
