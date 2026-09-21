@@ -1,0 +1,18 @@
+services:
+  replicator:
+    build:
+      context: ./replicator
+      dockerfile: Dockerfile
+    container_name: cdc_replicator
+    restart: always
+    environment:
+      - PYTHONUNBUFFERED=1
+    command: ["poetry", "run", "python", "-m", "src.replicator"]
+    env_file: .env
+    volumes:
+      - ./replicator/src:/app/src
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
