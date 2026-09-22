@@ -173,16 +173,7 @@ def ensure_audit_log_table(conn):
     END
     """)
 
-    
-    cursor.execute("""
-    IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID('dbo.sync_audit_log') AND name = 'content_hash')
-    BEGIN
-        ALTER TABLE dbo.sync_audit_log ADD content_hash VARCHAR(64) NULL
-        PRINT 'Added content_hash column to sync_audit_log table'
-    END
-    """)
 
-    
     cursor.execute("""
     IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'IX_sync_audit_log_table' AND object_id = OBJECT_ID('dbo.sync_audit_log'))
     CREATE INDEX IX_sync_audit_log_table ON dbo.sync_audit_log (table_name);
@@ -194,13 +185,7 @@ def ensure_audit_log_table(conn):
     CREATE INDEX IX_sync_audit_log_status ON dbo.sync_audit_log (status, log_id);
     """)
 
-    
-    cursor.execute("""
-    IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'IX_sync_audit_log_hash' AND object_id = OBJECT_ID('dbo.sync_audit_log'))
-    CREATE INDEX IX_sync_audit_log_hash ON dbo.sync_audit_log (content_hash) WHERE content_hash IS NOT NULL;
-    """)
 
-    
     cursor.execute("""
     IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'IX_sync_audit_log_source' AND object_id = OBJECT_ID('dbo.sync_audit_log'))
     CREATE INDEX IX_sync_audit_log_source ON dbo.sync_audit_log (source_id, created_at) WHERE source_id IS NOT NULL;

@@ -11,24 +11,22 @@ try:
         connect_db, ensure_table_exists, get_primary_key,
         upsert_data_odbc,
         sync_schema_direct, fetch_rows_by_pks,
-        get_source_id,
+        get_source_id, claim_source_identity,
     )
 except ImportError:
     from .db_utils import (
         connect_db, ensure_table_exists, get_primary_key,
         upsert_data_odbc,
         sync_schema_direct, fetch_rows_by_pks,
-        get_source_id,
+        get_source_id, claim_source_identity,
     )
 
 try:
     from setup_triggers import auto_discover_new_tables, setup_triggers, get_monitored_tables, ensure_audit_log_table
     from logger import Logger
-    from schema_validator import SchemaValidator
 except ImportError:
     from .setup_triggers import auto_discover_new_tables, setup_triggers, get_monitored_tables, ensure_audit_log_table
     from .logger import Logger
-    from .schema_validator import SchemaValidator
 
 try:
     from manual_sync import run_manual_sync
@@ -37,10 +35,9 @@ except ImportError:
 
 load_dotenv()
 
-BATCH_SIZE = int(os.getenv("KINGDOM_BATCH_SIZE", "500"))
-POLL_INTERVAL = float(os.getenv("KINGDOM_POLL_INTERVAL", "1.0"))
-SCHEMA_CHECK_INTERVAL = float(os.getenv("KINGDOM_SCHEMA_CHECK_INTERVAL", "5.0"))
-TABLE_SCAN_INTERVAL = float(os.getenv("KINGDOM_TABLE_SCAN_INTERVAL", "300.0"))
+POLL_INTERVAL = float(os.getenv("POLL_INTERVAL", "1.0"))
+SCHEMA_CHECK_INTERVAL = float(os.getenv("SCHEMA_CHECK_INTERVAL", "5.0"))
+TABLE_SCAN_INTERVAL = float(os.getenv("TABLE_SCAN_INTERVAL", "300.0"))
 
 
 def start_replicator():
@@ -48,10 +45,8 @@ def start_replicator():
 
     try:
         from multi_source_config import MultiSourceConfig
-        from deduplication_engine import DeduplicationEngine
     except ImportError:
         from .multi_source_config import MultiSourceConfig
-        from .deduplication_engine import DeduplicationEngine
 
     config_mgr = MultiSourceConfig()
     sources = config_mgr.load_sources()
@@ -60,7 +55,18 @@ def start_replicator():
         Logger.error("No sources configured. Please check environment variables (SYNC_SOURCES).")
         return
 
-    dedup_engine = DeduplicationEngine()
+    for source_id, config in sources.items():
+        pre_conn = None
+        try:
+            pre_conn = connect_db(config.prefix, target=True)
+            claim_source_identity(pre_conn, source_id, config.host, config.database)
+        except RuntimeError as claim_err:
+            Logger.error(f"SOURCE_ID conflict for source {source_id}", exc=claim_err)
+            return
+        finally:
+            if pre_conn:
+                try: pre_conn.close()
+                except: pass
 
     source_states = {source_id: {'pk_cache': {}, 'table_metadata': {}, 'last_discovery_time': 0} for source_id in sources.keys()}
     last_heartbeat_time = time.time()
@@ -174,24 +180,13 @@ def start_replicator():
                         if upsert_pks:
                             rows = fetch_rows_by_pks(src_conn, "dbo", table, pk_col, list(upsert_pks))
                             if rows:
-                                valid_rows = []
-                                valid_hashes = []
-                                for row in rows:
-                                    if config.insert_only:
-                                        is_dup, row_hash = dedup_engine.is_duplicate(table, row, source_id)
-                                        if is_dup:
-                                            continue
-                                        valid_hashes.append(row_hash)
-                                    valid_rows.append(row)
+                                valid_rows = list(rows)
 
                                 if valid_rows:
                                     machine_id = get_source_id()
                                     for r in valid_rows:
                                         r['sync_source_id'] = machine_id
                                     upsert_data_odbc(dst_conn, table, valid_rows, pk_col, insert_only=config.insert_only)
-                                    if config.insert_only:
-                                        for h in valid_hashes:
-                                            dedup_engine.mark_processed(table, h, source_id)
                                     Logger.info(f"[{machine_id}] Table: {table:<25} | Sync: {len(valid_rows):>4} rows | Status: [OK]", indent=1)
 
                     if log_ids:
@@ -236,12 +231,10 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.setup_triggers:
-        from setup_triggers import setup_triggers
         setup_triggers()
         sys.exit(0)
 
     if args.sync_missing:
-        from manual_sync import run_manual_sync
         run_manual_sync(args.table)
 
     start_replicator()

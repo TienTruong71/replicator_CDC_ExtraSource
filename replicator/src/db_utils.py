@@ -32,6 +32,49 @@ def get_source_id() -> str:
     return os.getenv("SOURCE_ID", "UNKNOWN").strip()
 
 
+def claim_source_identity(dst_conn, source_id: str, src_host: str, src_db: str) -> None:
+    """Register this deployment's SOURCE_ID on the target and reject collisions."""
+    cursor = dst_conn.cursor()
+    try:
+        cursor.execute("""
+            IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'sync_source_registry' AND schema_id = SCHEMA_ID('dbo'))
+            CREATE TABLE dbo.sync_source_registry (
+                source_id   NVARCHAR(50) NOT NULL PRIMARY KEY,
+                source_host NVARCHAR(255) NULL,
+                source_db   NVARCHAR(255) NULL,
+                claimed_at  DATETIME NOT NULL DEFAULT GETDATE()
+            );
+        """)
+        dst_conn.commit()
+
+        cursor.execute(
+            "SELECT source_host, source_db FROM dbo.sync_source_registry WHERE source_id = ?",
+            (source_id,),
+        )
+        row = cursor.fetchone()
+
+        if row is None:
+            cursor.execute(
+                "INSERT INTO dbo.sync_source_registry (source_id, source_host, source_db) VALUES (?, ?, ?)",
+                (source_id, src_host, src_db),
+            )
+            dst_conn.commit()
+            Logger.success(f"Claimed SOURCE_ID '{source_id}' for {src_host}/{src_db}.")
+            return
+
+        existing_host, existing_db = row
+        if (existing_host or "") == (src_host or "") and (existing_db or "") == (src_db or ""):
+            return
+
+        raise RuntimeError(
+            f"SOURCE_ID '{source_id}' is already claimed by {existing_host}/{existing_db} "
+            f"but this deployment is {src_host}/{src_db}. Two physical sources sharing one "
+            f"SOURCE_ID would drop the second source's rows. Set a distinct SOURCE_ID."
+        )
+    finally:
+        cursor.close()
+
+
 def connect_db(prefix: str, target: bool = False):
     prefix = prefix.upper()
     if target:
@@ -98,9 +141,19 @@ def ensure_table_exists(src_conn, dst_conn, table_name: str):
         Logger.warn(f"Source table '{table_name}' not found — skipping create.")
         return
 
+    pk_col = None
+    try:
+        pk_col = get_primary_key(table_name_clean, get_source_prefix(), cursor=src_cursor)
+    except Exception as e:
+        Logger.warn(f"Could not resolve PK for {table_name_clean} while creating target: {e}")
+
     col_defs = []
     for name, dtype, length, nullable in rows:
         dtype = (dtype or "").lower().strip()
+
+        if pk_col and name.lower() == pk_col.lower() and dtype in ("int", "bigint", "smallint"):
+            col_defs.append(f"[{name}] {dtype.upper()} IDENTITY(1,1) NOT NULL PRIMARY KEY")
+            continue
 
         if dtype in ("varchar", "nvarchar", "char", "nchar", "text", "ntext"):
             if not length or length < 0 or length >= 50:
@@ -128,6 +181,20 @@ def ensure_table_exists(src_conn, dst_conn, table_name: str):
     except Exception as e:
         dst_conn.rollback()
         Logger.error(f"Failed to create table {table_name_clean}", exc=e)
+        return
+
+    try:
+        idx_name = f"UX_{table_name_clean}_src"[:128]
+        dst_cursor.execute(
+            f"CREATE UNIQUE INDEX [{idx_name}] ON dbo.[{table_name_clean}] "
+            f"([sync_source_id], [source_record_id]) "
+            f"WHERE [sync_source_id] IS NOT NULL AND [source_record_id] IS NOT NULL"
+        )
+        dst_conn.commit()
+        Logger.success(f"Created unique index {idx_name} on dbo.[{table_name_clean}].")
+    except Exception as e:
+        dst_conn.rollback()
+        Logger.warn(f"Could not create unique index on dbo.[{table_name_clean}]: {e}")
 
 
 def get_primary_key(table_name: str, prefix: str, cursor=None):
@@ -282,9 +349,14 @@ def upsert_data_odbc(dst_conn, table, rows, primary_key, insert_only=False):
                 if original_pk_key in row:
                     row['source_record_id'] = str(row[original_pk_key])
 
-            if identity_cols:
-                Logger.info(f"Insert-only mode: stripping identity columns {identity_cols} for auto-generation")
-                rows = [{k: v for k, v in row.items() if k not in identity_cols} for row in rows]
+            strip_cols = set(identity_cols)
+            source_pk_key = (primary_key or columns[0]).lower()
+            if source_pk_key != 'source_record_id':
+                strip_cols.add(source_pk_key)
+
+            if strip_cols:
+                Logger.info(f"Insert-only mode: stripping target-generated columns {strip_cols}")
+                rows = [{k: v for k, v in row.items() if k not in strip_cols} for row in rows]
 
             columns = list(rows[0].keys())
 
@@ -359,10 +431,6 @@ def upsert_data_odbc(dst_conn, table, rows, primary_key, insert_only=False):
                         insert_values = [row.get(c) for c in columns]
                         insert_params.append(tuple(insert_values))
 
-            num_columns = len(columns)
-            dml_chunk_size = max(10, 2000 // (num_columns + 1))
-            dml_chunk_size = min(dml_chunk_size, 500)
-
             if update_params and update_cols:
                 set_clauses_exec = ", ".join([f"[{c}] = ?" for c in update_cols])
                 if has_source_id:
@@ -392,7 +460,24 @@ def upsert_data_odbc(dst_conn, table, rows, primary_key, insert_only=False):
                                 Logger.error(f"Row-level update failed in {table}", exc=row_error)
 
             if insert_params:
-                insert_sql = f"INSERT INTO {table_full} ({col_list}) VALUES ({placeholders_vals})"
+                cols_lower = [c.lower() for c in columns]
+                guard_insert = insert_only and 'sync_source_id' in cols_lower and 'source_record_id' in cols_lower
+
+                if guard_insert:
+                    src_id_pos = cols_lower.index('sync_source_id')
+                    rec_id_pos = cols_lower.index('source_record_id')
+                    select_list = ", ".join(["?" for _ in columns])
+                    insert_sql = (
+                        f"INSERT INTO {table_full} ({col_list}) "
+                        f"SELECT {select_list} WHERE NOT EXISTS ("
+                        f"SELECT 1 FROM {table_full} WITH (UPDLOCK, HOLDLOCK) "
+                        f"WHERE [sync_source_id] = ? AND [source_record_id] = ?)"
+                    )
+                    insert_params = [
+                        p + (p[src_id_pos], p[rec_id_pos]) for p in insert_params
+                    ]
+                else:
+                    insert_sql = f"INSERT INTO {table_full} ({col_list}) VALUES ({placeholders_vals})"
                 chunk_size_exec = 1000
                 use_fast = table_full not in FAST_EXEC_FAIL_CACHE
 
@@ -412,6 +497,15 @@ def upsert_data_odbc(dst_conn, table, rows, primary_key, insert_only=False):
                         sub_chunk_size = 200
                         for j in range(0, len(chunk), sub_chunk_size):
                             sub_chunk = chunk[j:j+sub_chunk_size]
+
+                            if guard_insert:
+                                for row_params in sub_chunk:
+                                    try:
+                                        cursor.execute(insert_sql, row_params)
+                                    except Exception as row_error:
+                                        Logger.error(f"Row-level insert failed in {table}", exc=row_error)
+                                continue
+
                             v_placeholders = ", ".join(["(" + ", ".join(["?"] * len(columns)) + ")"] * len(sub_chunk))
 
                             f_params = [val for row_tuple in sub_chunk for val in row_tuple]

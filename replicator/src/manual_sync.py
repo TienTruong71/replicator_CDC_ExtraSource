@@ -6,10 +6,10 @@ from dotenv import load_dotenv
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 try:
-    from db_utils import connect_db, get_primary_key, ensure_table_exists, sync_schema_direct, get_source_prefix
+    from db_utils import connect_db, get_primary_key, ensure_table_exists, sync_schema_direct, get_source_prefix, get_source_id
     from logger import Logger
 except ImportError:
-    from .db_utils import connect_db, get_primary_key, ensure_table_exists, sync_schema_direct, get_source_prefix
+    from .db_utils import connect_db, get_primary_key, ensure_table_exists, sync_schema_direct, get_source_prefix, get_source_id
     from .logger import Logger
 
 load_dotenv()
@@ -39,6 +39,122 @@ def get_target_pks(conn, table_name, pk_col):
     cursor.close()
     return pks
 
+
+def get_target_source_record_ids(conn, table_name, source_id):
+    """Fetch source_record_id values already present on the target for this source."""
+    cursor = conn.cursor()
+    Logger.info(f"Fetching existing source_record_id from Target for {table_name} (source={source_id})...")
+
+    ids = set()
+    table_clean = table_name.replace('[', '').replace(']', '').replace('dbo.', '')
+
+    check_col = """
+        SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA='dbo' AND TABLE_NAME=? AND COLUMN_NAME='source_record_id'
+    """
+    cursor.execute(check_col, (table_clean,))
+    if cursor.fetchone()[0] == 0:
+        Logger.warn(f"  > Target dbo.[{table_clean}] has no source_record_id column yet — treating as empty.", indent=1)
+        cursor.close()
+        return ids
+
+    query = f"SELECT [source_record_id] FROM dbo.[{table_clean}] WHERE [sync_source_id] = ?"
+    cursor.execute(query, (source_id,))
+    count = 0
+    while True:
+        rows = cursor.fetchmany(50000)
+        if not rows:
+            break
+        for row in rows:
+            if row[0] is not None:
+                ids.add(str(row[0]))
+            count += 1
+        if count % 250000 == 0:
+            Logger.info(f"  > Loaded {count:,} Target source_record_ids...", indent=1)
+
+    Logger.success(f"Loaded {len(ids):,} existing source_record_ids for source {source_id}.", indent=1)
+    cursor.close()
+    return ids
+
+
+NUMERIC_PK_TYPES = ("int", "bigint", "smallint", "tinyint", "numeric", "decimal")
+
+
+def get_source_pk_type(conn, table_name, pk_col):
+    """Return the SQL data type of the source PK column, lowercased."""
+    cursor = conn.cursor()
+    table_clean = table_name.replace('[', '').replace(']', '').replace('dbo.', '')
+    cursor.execute(
+        "SELECT DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS "
+        "WHERE TABLE_SCHEMA='dbo' AND TABLE_NAME=? AND COLUMN_NAME=?",
+        (table_clean, pk_col),
+    )
+    row = cursor.fetchone()
+    cursor.close()
+    return (row[0].lower().strip() if row and row[0] else "")
+
+
+def get_target_watermark(conn, table_name, source_id):
+    """Return the highest numeric source_record_id already on target for this source, else None."""
+    cursor = conn.cursor()
+    table_clean = table_name.replace('[', '').replace(']', '').replace('dbo.', '')
+
+    cursor.execute(
+        "SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS "
+        "WHERE TABLE_SCHEMA='dbo' AND TABLE_NAME=? AND COLUMN_NAME='source_record_id'",
+        (table_clean,),
+    )
+    if cursor.fetchone()[0] == 0:
+        cursor.close()
+        return None
+
+    cursor.execute(
+        f"SELECT MAX(CAST([source_record_id] AS BIGINT)) FROM dbo.[{table_clean}] "
+        f"WHERE [sync_source_id] = ? AND [source_record_id] IS NOT NULL",
+        (source_id,),
+    )
+    row = cursor.fetchone()
+    cursor.close()
+    return row[0] if row and row[0] is not None else None
+
+
+def queue_missing_by_watermark(src_conn, audit_conn, table_name, pk_col, watermark):
+    """Queue source rows whose numeric PK is above the target watermark. O(1) memory."""
+    src_cursor = src_conn.cursor()
+    table_clean = table_name.replace('[', '').replace(']', '').replace('dbo.', '')
+
+    if watermark is None:
+        src_cursor.execute(f"SELECT [{pk_col}] FROM dbo.[{table_clean}]")
+        Logger.info(f"No watermark for {table_clean} — queueing all source rows.")
+    else:
+        src_cursor.execute(
+            f"SELECT [{pk_col}] FROM dbo.[{table_clean}] WHERE [{pk_col}] > ?",
+            (watermark,),
+        )
+        Logger.info(f"Watermark for {table_clean} = {watermark}; queueing rows above it.")
+
+    missing_pks = []
+    total = 0
+    while True:
+        rows = src_cursor.fetchmany(50000)
+        if not rows:
+            break
+        for row in rows:
+            missing_pks.append(str(row[0]))
+            total += 1
+            if len(missing_pks) >= 50000:
+                inject_to_audit_log(audit_conn, table_name, missing_pks)
+                missing_pks = []
+        if total % 250000 == 0:
+            Logger.info(f"  > Queued {total:,} rows...", indent=1)
+
+    if missing_pks:
+        inject_to_audit_log(audit_conn, table_name, missing_pks)
+
+    Logger.success(f"Completed! Queued {total:,} rows above watermark for {table_clean}.")
+    src_cursor.close()
+
+
 def find_and_queue_missing(src_conn, dst_conn, audit_conn, table_name):
     """Find missing rows and insert them into sync_audit_log."""
     prefix = get_source_prefix()
@@ -52,14 +168,23 @@ def find_and_queue_missing(src_conn, dst_conn, audit_conn, table_name):
     sync_schema_direct(src_conn, dst_conn, "dbo", table_clean)
 
     insert_only = os.getenv(f"{prefix}_INSERT_ONLY", "false").lower() in ("true", "1", "yes", "on")
+
     if insert_only:
-        Logger.info(f"Insert-only mode active: Queueing all source records for deduplication check...")
-        target_pks = set()
+        source_id = get_source_id()
+        pk_type = get_source_pk_type(src_conn, table_name, pk_col)
+        if pk_type in NUMERIC_PK_TYPES:
+            watermark = get_target_watermark(dst_conn, table_name, source_id)
+            queue_missing_by_watermark(src_conn, audit_conn, table_name, pk_col, watermark)
+            return
+        Logger.warn(
+            f"PK '{pk_col}' of {table_clean} is non-numeric ({pk_type}); "
+            f"falling back to in-memory diff. Large non-numeric tables may exhaust RAM."
+        )
+        target_pks = get_target_source_record_ids(dst_conn, table_name, source_id)
     else:
         target_pks = get_target_pks(dst_conn, table_name, pk_col)
 
     src_cursor = src_conn.cursor()
-    table_clean = table_name.replace('[', '').replace(']', '').replace('dbo.', '')
     src_query = f"SELECT [{pk_col}] FROM dbo.[{table_clean}]"
 
     src_cursor.execute(src_query)

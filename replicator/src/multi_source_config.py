@@ -1,8 +1,7 @@
 import os
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Any
+from typing import Dict, Optional
 from dotenv import load_dotenv
-import pyodbc
 import time
 from threading import Lock
 
@@ -10,11 +9,6 @@ try:
     from logger import Logger
 except ImportError:
     from .logger import Logger
-
-try:
-    from db_utils import connect_db
-except ImportError:
-    from .db_utils import connect_db
 
 
 @dataclass
@@ -41,18 +35,6 @@ class SourceConfig:
             raise ValueError(f"Username is required for source {self.prefix}")
         if self.port <= 0:
             raise ValueError(f"Port must be positive for source {self.prefix}")
-
-
-@dataclass
-class ValidationResult:
-    """Result of configuration validation."""
-    is_valid: bool
-    source_results: Dict[str, bool]
-    errors: Dict[str, str]
-
-    def __post_init__(self):
-        """Calculate overall validity based on source results."""
-        self.is_valid = len(self.source_results) > 0 and all(self.source_results.values())
 
 
 class MultiSourceConfig:
@@ -104,107 +86,6 @@ class MultiSourceConfig:
 
             return self._sources.copy()
 
-    def validate_connectivity(self) -> ValidationResult:
-        """
-        Validate database connectivity for all configured sources.
-
-        Returns:
-            ValidationResult: Validation results including per-source status
-        """
-        Logger.info("Validating database connectivity for all sources...")
-
-        source_results = {}
-        errors = {}
-
-        for source_id, config in self._sources.items():
-            try:
-                Logger.info(f"Testing connection to {source_id} ({config.host}:{config.port}/{config.database})")
-
-                src_conn = None
-                try:
-                    src_conn = connect_db(config.prefix, target=False)
-                    cursor = src_conn.cursor()
-                    cursor.execute("SELECT 1")
-                    cursor.fetchone()
-                    cursor.close()
-
-                    Logger.success(f"Source database connection validated for {source_id}")
-                    source_results[source_id] = True
-
-                except Exception as src_err:
-                    error_msg = f"Source database connection failed: {str(src_err)}"
-                    Logger.error(f"Source validation failed for {source_id}: {error_msg}")
-                    source_results[source_id] = False
-                    errors[source_id] = error_msg
-                finally:
-                    if src_conn:
-                        try:
-                            src_conn.close()
-                        except:
-                            pass
-
-                if source_results.get(source_id, False):
-                    dst_conn = None
-                    try:
-                        dst_conn = connect_db(config.prefix, target=True)
-                        cursor = dst_conn.cursor()
-                        cursor.execute("SELECT 1")
-                        cursor.fetchone()
-                        cursor.close()
-
-                        Logger.success(f"Target database connection validated for {source_id}")
-
-                    except Exception as dst_err:
-                        error_msg = f"Target database connection failed: {str(dst_err)}"
-                        Logger.error(f"Target validation failed for {source_id}: {error_msg}")
-                        source_results[source_id] = False
-                        errors[source_id] = error_msg
-                    finally:
-                        if dst_conn:
-                            try:
-                                dst_conn.close()
-                            except:
-                                pass
-
-            except Exception as e:
-                error_msg = f"Configuration validation error: {str(e)}"
-                Logger.error(f"Validation failed for {source_id}: {error_msg}")
-                source_results[source_id] = False
-                errors[source_id] = error_msg
-
-        result = ValidationResult(
-            is_valid=False,
-            source_results=source_results,
-            errors=errors
-        )
-
-        if result.is_valid:
-            Logger.success(f"All {len(source_results)} sources validated successfully")
-        else:
-            failed_sources = [sid for sid, valid in source_results.items() if not valid]
-            Logger.error(f"Validation failed for sources: {', '.join(failed_sources)}")
-
-        return result
-
-    def get_insert_only_sources(self) -> List[str]:
-        """
-        Get list of source IDs that are configured for insert-only mode.
-
-        Returns:
-            List[str]: List of source IDs with insert_only=True
-        """
-        insert_only_sources = [
-            source_id for source_id, config in self._sources.items()
-            if config.insert_only
-        ]
-
-        if insert_only_sources:
-            Logger.info(f"Insert-only sources: {', '.join(insert_only_sources)}")
-        else:
-            Logger.info("No sources configured for insert-only mode")
-
-        return insert_only_sources
-
     def reload_config(self) -> None:
         """
         Reload configuration from environment variables if changes are detected.
@@ -230,18 +111,6 @@ class MultiSourceConfig:
 
             Logger.success(f"Configuration reloaded: {old_count} -> {new_count} sources")
 
-    def get_source_config(self, source_id: str) -> Optional[SourceConfig]:
-        """
-        Get configuration for a specific source.
-
-        Args:
-            source_id: The source identifier
-
-        Returns:
-            Optional[SourceConfig]: The source configuration or None if not found
-        """
-        return self._sources.get(source_id)
-
     def get_all_sources(self) -> Dict[str, SourceConfig]:
         """
         Get all loaded source configurations.
@@ -251,44 +120,6 @@ class MultiSourceConfig:
         """
         with self._config_lock:
             return self._sources.copy()
-
-    def _has_legacy_config(self) -> bool:
-        """Check if legacy KINGDOM_ configuration exists."""
-        return bool(
-            os.getenv("KINGDOM_SQLSERVER_HOST") and
-            os.getenv("KINGDOM_SQLSERVER_DB") and
-            os.getenv("KINGDOM_SQLSERVER_USER")
-        )
-
-    def _load_legacy_config(self) -> Optional[SourceConfig]:
-        """Load legacy KINGDOM_ configuration for backward compatibility."""
-        try:
-            host = os.getenv("KINGDOM_SQLSERVER_HOST")
-            database = os.getenv("KINGDOM_SQLSERVER_DB")
-            username = os.getenv("KINGDOM_SQLSERVER_USER")
-            password = os.getenv("KINGDOM_SQLSERVER_PASS", "")
-            port = int(os.getenv("KINGDOM_SQLSERVER_PORT", "1433"))
-            batch_size = int(os.getenv("KINGDOM_BATCH_SIZE", "500"))
-            poll_interval = float(os.getenv("KINGDOM_POLL_INTERVAL", "1.0"))
-
-            insert_only = os.getenv("KINGDOM_INSERT_ONLY", "false").lower() in ("true", "1", "yes")
-
-            return SourceConfig(
-                prefix="KINGDOM",
-                host=host,
-                port=port,
-                database=database,
-                username=username,
-                password=password,
-                source_id="KINGDOM",
-                insert_only=insert_only,
-                batch_size=batch_size,
-                poll_interval=poll_interval
-            )
-
-        except (ValueError, TypeError) as e:
-            Logger.error(f"Failed to parse legacy KINGDOM configuration", exc=e)
-            return None
 
     def _load_source_config(self, prefix: str) -> Optional[SourceConfig]:
         """
