@@ -26,6 +26,43 @@ def get_source_id() -> str:
     return os.getenv("SOURCE_ID", "UNKNOWN").strip()
 
 
+def cleanup_processed_audit_log(conn, retention_days: int) -> int:
+    """Delete 'processed' rows from sync_audit_log older than retention_days.
+
+    Only touches rows already synced (status='processed'); 'pending' rows are
+    never removed. Returns the number of rows deleted. Deleting these rows does
+    NOT affect initial/manual sync, which diffs source against target, not the
+    audit log.
+    """
+    if retention_days <= 0:
+        return 0
+
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "DELETE FROM dbo.sync_audit_log "
+            "WHERE status = 'processed' AND processed_at IS NOT NULL "
+            "AND processed_at < DATEADD(day, ?, GETDATE())",
+            (-retention_days,),
+        )
+        deleted = cursor.rowcount
+        conn.commit()
+        if deleted and deleted > 0:
+            Logger.info(
+                f"Audit log cleanup: removed {deleted:,} processed rows older than {retention_days} day(s)."
+            )
+        return deleted if deleted and deleted > 0 else 0
+    except Exception as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        Logger.error("Audit log cleanup failed", exc=e)
+        return 0
+    finally:
+        cursor.close()
+
+
 def claim_source_identity(dst_conn, source_id: str, src_host: str, src_db: str) -> None:
     """Register this deployment's SOURCE_ID on the target and reject collisions."""
     cursor = dst_conn.cursor()

@@ -12,6 +12,7 @@ try:
         upsert_data_odbc,
         sync_schema_direct, fetch_rows_by_pks,
         get_source_id, claim_source_identity,
+        cleanup_processed_audit_log,
     )
 except ImportError:
     from .db_utils import (
@@ -19,6 +20,7 @@ except ImportError:
         upsert_data_odbc,
         sync_schema_direct, fetch_rows_by_pks,
         get_source_id, claim_source_identity,
+        cleanup_processed_audit_log,
     )
 
 try:
@@ -38,6 +40,10 @@ load_dotenv()
 POLL_INTERVAL = float(os.getenv("POLL_INTERVAL", "1.0"))
 SCHEMA_CHECK_INTERVAL = float(os.getenv("SCHEMA_CHECK_INTERVAL", "5.0"))
 TABLE_SCAN_INTERVAL = float(os.getenv("TABLE_SCAN_INTERVAL", "300.0"))
+
+
+AUDIT_LOG_RETENTION_DAYS = int(os.getenv("AUDIT_LOG_RETENTION_DAYS", "7"))
+AUDIT_LOG_CLEANUP_INTERVAL = float(os.getenv("AUDIT_LOG_CLEANUP_INTERVAL", "3600.0"))
 
 
 def start_replicator():
@@ -70,6 +76,7 @@ def start_replicator():
 
     source_states = {source_id: {'pk_cache': {}, 'table_metadata': {}, 'last_discovery_time': 0} for source_id in sources.keys()}
     last_heartbeat_time = time.time()
+    last_cleanup_time = 0.0
 
     Logger.success("Replicator main loop active.")
 
@@ -95,6 +102,11 @@ def start_replicator():
                     if not state.get('audit_log_ensured', False):
                         ensure_audit_log_table(src_conn)
                         state['audit_log_ensured'] = True
+
+                    if (AUDIT_LOG_RETENTION_DAYS > 0
+                            and time.time() - last_cleanup_time >= AUDIT_LOG_CLEANUP_INTERVAL):
+                        cleanup_processed_audit_log(src_conn, AUDIT_LOG_RETENTION_DAYS)
+                        last_cleanup_time = time.time()
 
                     state = source_states[source_id]
                     pk_cache = state['pk_cache']
