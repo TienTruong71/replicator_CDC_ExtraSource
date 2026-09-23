@@ -139,6 +139,18 @@ def perform_initial_sync():
     except Exception as e:
         print(f"Initial sync failed: {e}")
 
+def pause_before_exit():
+    """Keep the console window open so the user can read the logs.
+
+    When running as a .exe, an unhandled exit closes the cmd window instantly.
+    This waits for the user to press Enter before returning.
+    """
+    try:
+        input("\nProgram stopped. Press Enter to close this window...")
+    except (EOFError, KeyboardInterrupt):
+        pass
+
+
 def auto_run():
     """Auto setup and run replicator"""
     print("=" * 60)
@@ -222,7 +234,16 @@ def main():
         print("Manual mode - use setup.py for step-by-step control")
         return
 
-    auto_run()
+    try:
+        auto_run()
+    except KeyboardInterrupt:
+        print("\nStopped by user.")
+    except Exception as e:
+        print(f"\nFatal error: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        pause_before_exit()
 
 if __name__ == "__main__":
     main()
