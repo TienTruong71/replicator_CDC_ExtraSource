@@ -18,16 +18,10 @@ FAST_EXEC_FAIL_CACHE = set()
 
 
 def get_source_prefix() -> str:
-    """Return the fixed source prefix 'SOURCE'.
-    Config vars are always SOURCE_SQLSERVER_HOST, SOURCE_SQLSERVER_DB, etc.
-    To change machine identity, only SOURCE_ID in .env needs to be updated."""
     return "SOURCE"
 
 
 def get_source_id() -> str:
-    """Return the unique machine/station identity from SOURCE_ID in .env.
-    This value is stamped into sync_source_id column in the destination DB.
-    Falls back to 'UNKNOWN' if not set."""
     load_dotenv()
     return os.getenv("SOURCE_ID", "UNKNOWN").strip()
 

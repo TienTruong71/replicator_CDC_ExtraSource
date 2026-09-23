@@ -3,8 +3,7 @@ Schema Validation for Multi-Source Sync
 Validates table schemas across multiple sources to prevent conflicts
 """
 
-import time
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple
 
 try:
     from logger import Logger

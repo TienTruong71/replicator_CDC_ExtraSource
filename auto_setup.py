@@ -1,6 +1,5 @@
 import sys
 import os
-import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'replicator', 'src'))
 
@@ -75,6 +74,10 @@ def auto_setup():
 def check_initial_sync_needed():
     """Check if initial sync is needed by comparing source vs target counts"""
     try:
+        if os.getenv("SKIP_INITIAL_SYNC", "false").lower() in ("true", "1", "yes", "on"):
+            print("SKIP_INITIAL_SYNC is set. Skipping initial sync; relying on triggers only.")
+            return False
+
         prefix = get_source_prefix()
         sync_tables = os.getenv(f"{prefix}_SYNC_TABLES", "")
         if not sync_tables:

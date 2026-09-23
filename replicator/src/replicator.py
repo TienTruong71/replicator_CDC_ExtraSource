@@ -83,6 +83,7 @@ def start_replicator():
                     source_states[source_id] = {'pk_cache': {}, 'table_metadata': {}, 'last_discovery_time': 0, 'audit_log_ensured': False}
 
                 prefix = config.prefix
+                excluded = {t.strip() for t in os.getenv(f"{prefix}_EXCLUDE_TABLES", "").split(",") if t.strip()}
                 src_conn = None
                 dst_conn = None
                 try:
@@ -157,6 +158,8 @@ def start_replicator():
                     for log_id, table, pk, op in logs:
                         log_ids.append(log_id)
                         if table.startswith("sys") or table.startswith("MSr") or table == "sync_audit_log" or table == "sync_dedup_tracker":
+                            continue
+                        if table in excluded:
                             continue
 
                         if table not in changes_by_table:

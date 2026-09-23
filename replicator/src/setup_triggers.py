@@ -6,13 +6,39 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from dotenv import load_dotenv
 
 try:
-    from db_utils import connect_db, ensure_table_exists
+    from db_utils import connect_db
     from logger import Logger
 except ImportError:
-    from .db_utils import connect_db, ensure_table_exists
+    from .db_utils import connect_db
     from .logger import Logger
 
 load_dotenv()
+
+
+def _list_source_tables(cursor, prefix: str):
+    cursor.execute("""
+        SELECT TABLE_NAME
+        FROM INFORMATION_SCHEMA.TABLES
+        WHERE TABLE_TYPE = 'BASE TABLE'
+          AND TABLE_SCHEMA = 'dbo'
+          AND TABLE_NAME NOT IN ('sync_audit_log', 'sysdiagrams', 'sync_dedup_tracker')
+          AND TABLE_NAME NOT LIKE 'sys%'
+          AND TABLE_NAME NOT LIKE 'MSr%'
+          AND TABLE_NAME NOT LIKE '%[_]tracking'
+    """)
+    tables = [row[0] for row in cursor.fetchall()]
+
+    allow = os.getenv(f"{prefix}_SYNC_TABLES")
+    if allow:
+        allowed = {t.strip() for t in allow.split(",") if t.strip()}
+        tables = [t for t in tables if t in allowed]
+
+    block = os.getenv(f"{prefix}_EXCLUDE_TABLES")
+    if block:
+        blocked = {t.strip() for t in block.split(",") if t.strip()}
+        tables = [t for t in tables if t not in blocked]
+
+    return tables
 
 
 def _get_pk_for_table(cursor, table: str):
@@ -217,24 +243,8 @@ def setup_triggers():
             ensure_audit_log_table(conn)
             cursor = conn.cursor()
 
-            cursor.execute("""
-                SELECT TABLE_NAME
-                FROM INFORMATION_SCHEMA.TABLES
-                WHERE TABLE_TYPE = 'BASE TABLE'
-                  AND TABLE_SCHEMA = 'dbo'
-                  AND TABLE_NAME NOT IN ('sync_audit_log', 'sysdiagrams', 'sync_dedup_tracker')
-                  AND TABLE_NAME NOT LIKE 'sys%'
-                  AND TABLE_NAME NOT LIKE 'MSr%'
-                  AND TABLE_NAME NOT LIKE '%[_]tracking'
-            """)
-            tables = [row[0] for row in cursor.fetchall()]
+            tables = _list_source_tables(cursor, prefix)
             cursor.close()
-
-            sync_tables = os.getenv(f"{prefix}_SYNC_TABLES")
-            if sync_tables:
-                allowed_tables = [t.strip() for t in sync_tables.split(",")]
-                print(f"Limiting sync to specific tables: {', '.join(allowed_tables)}")
-                tables = [t for t in tables if t in allowed_tables]
 
             for table in tables:
                 print(f"Setting up CDC for: {table} (Insert Only: {config.insert_only})")
@@ -249,24 +259,8 @@ def setup_triggers():
 def auto_discover_new_tables(conn, prefix: str, insert_only: bool = False):
     ensure_audit_log_table(conn)
     cursor = conn.cursor()
-    cursor.execute("""
-        SELECT TABLE_NAME
-        FROM INFORMATION_SCHEMA.TABLES
-        WHERE TABLE_TYPE = 'BASE TABLE'
-          AND TABLE_SCHEMA = 'dbo'
-          AND TABLE_NAME NOT IN ('sync_audit_log', 'sysdiagrams', 'sync_dedup_tracker')
-          AND TABLE_NAME NOT LIKE 'sys%'
-          AND TABLE_NAME NOT LIKE 'MSr%'
-          AND TABLE_NAME NOT LIKE '%[_]tracking'
-    """)
-    all_tables = [r[0] for r in cursor.fetchall()]
+    all_tables = _list_source_tables(cursor, prefix)
 
-    sync_tables = os.getenv(f"{prefix}_SYNC_TABLES")
-    if sync_tables:
-        allowed_tables = [t.strip() for t in sync_tables.split(",")]
-        all_tables = [t for t in all_tables if t in allowed_tables]
-
-    
     expected_count = 1 if insert_only else 2
     
     cursor.execute(f"""
@@ -291,22 +285,7 @@ def auto_discover_new_tables(conn, prefix: str, insert_only: bool = False):
 def get_monitored_tables(conn, prefix: str, insert_only: bool = False):
     """Returns a list of tables that currently have CDC triggers and are allowed by config."""
     cursor = conn.cursor()
-    cursor.execute("""
-        SELECT TABLE_NAME
-        FROM INFORMATION_SCHEMA.TABLES
-        WHERE TABLE_TYPE = 'BASE TABLE'
-          AND TABLE_SCHEMA = 'dbo'
-          AND TABLE_NAME NOT IN ('sync_audit_log', 'sysdiagrams', 'sync_dedup_tracker')
-          AND TABLE_NAME NOT LIKE 'sys%'
-          AND TABLE_NAME NOT LIKE 'MSr%'
-          AND TABLE_NAME NOT LIKE '%[_]tracking'
-    """)
-    all_tables = [r[0] for r in cursor.fetchall()]
-
-    sync_tables = os.getenv(f"{prefix}_SYNC_TABLES")
-    if sync_tables:
-        allowed = [t.strip() for t in sync_tables.split(",")]
-        all_tables = [t for t in all_tables if t in allowed]
+    all_tables = _list_source_tables(cursor, prefix)
 
     expected_count = 1 if insert_only else 2
 
