@@ -1,28 +1,4 @@
-/* ============================================================
-   Pallet - doi PRIMARY KEY o CA HAI DAU de chay dung da nguon.
-   >>> KHONG CHAY TRONG DOT CUTOVER DAU. Chay sau, rieng biet. <<<
 
-   Van de: Pallet.Time dang la PK o ca nguon lan dich.
-     - Insert-only strip PK -> INSERT thieu PK -> fail.
-     - Time lam PK toan cuc o dich -> 2 nguon cung thoi diem -> mat dong.
-
-   Muc tieu:
-     - NGUON: bo PK Time, them sync_row_id IDENTITY lam PK.
-              -> tool strip sync_row_id, luu vao source_record_id, Time chay qua nhu du lieu thuong.
-     - DICH : them id IDENTITY lam PK moi, ha Time xuong cot thuong.
-              -> dich tu sinh id; chong trung bang (sync_source_id, source_record_id).
-
-   AN TOAN:
-     - Backup CA HAI DB truoc khi chay.
-     - Dung tool cu / app ghi vao Pallet o ca hai dau.
-     - Doi PK la thao tac nang, khoa bang. Chay off-hours.
-   Cac phan duoc tach lam 2 block USE - chay dung block cho dung DB.
-   ============================================================ */
-
-
-/* ------------------------------------------------------------
-   BLOCK A - chay TREN DB NGUON (QC / moi nguon)
-   ------------------------------------------------------------ */
 USE [QC];  
 GO
 SET NOCOUNT ON;

@@ -250,20 +250,16 @@ def main():
     print(f"\nCompleted: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
     
-    print("\nPress any key to exit...")
+    print("\nPress ESC to exit...")
 
     import msvcrt
     import time
 
-    timeout = 10
-    start_time = time.time()
-    while time.time() - start_time < timeout:
+    while True:
         if msvcrt.kbhit():
-            msvcrt.getch()
-            break
-        remaining = timeout - int(time.time() - start_time)
-        if remaining > 0 and remaining != timeout:
-            print(f"\rClosing in {remaining}s... (Press any key to exit)", end='', flush=True)
+            key = msvcrt.getch()
+            if key == b'\x1b': 
+                break
         time.sleep(0.1)
 
     print("\nExiting...")
