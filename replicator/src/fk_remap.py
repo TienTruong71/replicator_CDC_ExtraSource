@@ -11,12 +11,16 @@ _FK_CACHE_TS = {}
 _FK_CACHE_TTL = 300.0
 
 
+def _scope(full_map, tables):
+    tables_lower = {t.lower() for t in tables}
+    return {c: links for c, links in full_map.items() if c in tables_lower}
+
+
 def discover_fk_relationships(dst_conn, tables, cache_key="default"):
     now = time.time()
     if cache_key in _FK_CACHE and now - _FK_CACHE_TS.get(cache_key, 0) < _FK_CACHE_TTL:
-        return _FK_CACHE[cache_key]
+        return _scope(_FK_CACHE[cache_key], tables)
 
-    tables_lower = {t.lower() for t in tables}
     cursor = dst_conn.cursor()
     cursor.execute("""
         SELECT
@@ -56,16 +60,15 @@ def discover_fk_relationships(dst_conn, tables, cache_key="default"):
             )
             continue
         parent_table, parent_col, child_table, child_col = cols[0]
-        if child_table.lower() not in tables_lower or parent_table.lower() not in tables_lower:
-            continue
         result.setdefault(child_table.lower(), []).append((child_col, parent_table, parent_col))
 
     _FK_CACHE[cache_key] = result
     _FK_CACHE_TS[cache_key] = now
-    link_count = sum(len(v) for v in result.values())
+    scoped = _scope(result, tables)
+    link_count = sum(len(v) for v in scoped.values())
     if link_count:
-        Logger.info(f"Discovered {link_count} FK link(s) across {len(result)} child table(s) for remap.")
-    return result
+        Logger.info(f"Discovered {link_count} FK link(s) across {len(scoped)} child table(s) for remap.")
+    return scoped
 
 
 def topological_order(tables, fk_map):

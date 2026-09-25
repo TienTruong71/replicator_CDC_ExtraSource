@@ -5,6 +5,7 @@ This replaces the old executable with our new multi-source version
 
 import os
 import sys
+import time
 import subprocess
 
 def install_pyinstaller():
@@ -129,10 +130,15 @@ def create_simple_build():
     """Create simple one-file executable"""
     try:
         print("Creating simple build...")
-        
+
+        exe_path = os.path.join('dist', 'CDC_Replicator.exe')
+        mtime_before = os.path.getmtime(exe_path) if os.path.exists(exe_path) else 0
+
         cmd = [
             sys.executable, '-m', 'PyInstaller',
             '--onefile',
+            '--clean',
+            '--noconfirm',
             '--name', 'CDC_Replicator',
             '--add-data', '.env;.',
             '--add-data', 'replicator/src;replicator/src',
@@ -142,19 +148,34 @@ def create_simple_build():
             '--console',
             'auto_setup.py'
         ]
-        
+
         result = subprocess.run(cmd, capture_output=True, text=True)
-        
-        if result.returncode == 0:
-            exe_path = os.path.join('dist', 'CDC_Replicator.exe')
-            if os.path.exists(exe_path):
-                file_size = os.path.getsize(exe_path) / (1024*1024)
-                print(f"SUCCESS: Created CDC_Replicator.exe ({file_size:.1f} MB)")
-                return True
-        
-        print("Simple build failed:", result.stderr)
-        return False
-        
+
+        if result.returncode != 0:
+            print("Simple build failed (exit code %s)" % result.returncode)
+            print("STDOUT:", result.stdout[-3000:])
+            print("STDERR:", result.stderr[-3000:])
+            return False
+
+        if not os.path.exists(exe_path):
+            print("ERROR: PyInstaller exited 0 but no executable was produced.")
+            print("STDOUT:", result.stdout[-3000:])
+            return False
+
+        mtime_after = os.path.getmtime(exe_path)
+        if mtime_after <= mtime_before:
+            print("ERROR: CDC_Replicator.exe was NOT rewritten (still dated %s)."
+                  % time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(mtime_after)))
+            print("The old executable is still in place. Close any running")
+            print("CDC_Replicator.exe (Windows locks files that are in use) and retry.")
+            print("STDOUT:", result.stdout[-3000:])
+            return False
+
+        file_size = os.path.getsize(exe_path) / (1024*1024)
+        print(f"SUCCESS: Created CDC_Replicator.exe ({file_size:.1f} MB)")
+        print("Built at: %s" % time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(mtime_after)))
+        return True
+
     except Exception as e:
         print(f"Simple build error: {e}")
         return False
