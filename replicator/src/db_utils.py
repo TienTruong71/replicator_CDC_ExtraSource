@@ -15,6 +15,7 @@ except ImportError:
 load_dotenv()
 
 FAST_EXEC_FAIL_CACHE = set()
+SOURCE_SELECT_CACHE = {}
 
 
 def get_source_prefix() -> str:
@@ -181,6 +182,9 @@ def ensure_table_exists(src_conn, dst_conn, table_name: str):
     col_defs = []
     for name, dtype, length, nullable in rows:
         dtype = (dtype or "").lower().strip()
+
+        if dtype in ("timestamp", "rowversion"):
+            continue
 
         if pk_col and name.lower() == pk_col.lower() and dtype in ("int", "bigint", "smallint"):
             col_defs.append(f"[{name}] {dtype.upper()} IDENTITY(1,1) NOT NULL PRIMARY KEY")
@@ -374,11 +378,19 @@ def upsert_data_odbc(dst_conn, table, rows, primary_key, insert_only=False):
 
         if insert_only:
 
+            original_pk_key = (primary_key or columns[0]).lower()
+            missing_pk = 0
             for row in rows:
-
-                original_pk_key = primary_key or columns[0]
-                if original_pk_key in row:
+                if original_pk_key in row and row[original_pk_key] is not None:
                     row['source_record_id'] = str(row[original_pk_key])
+                else:
+                    missing_pk += 1
+
+            if missing_pk:
+                Logger.error(
+                    f"Insert-only: {missing_pk} row(s) in {table} have no value for PK "
+                    f"'{original_pk_key}' — source_record_id will be NULL and FK remap will fail"
+                )
 
             strip_cols = set(identity_cols)
             source_pk_key = (primary_key or columns[0]).lower()
@@ -400,6 +412,7 @@ def upsert_data_odbc(dst_conn, table, rows, primary_key, insert_only=False):
         try:
             update_params = []
             insert_params = []
+            insert_failures = 0
 
 
             cursor.execute(f"""
@@ -534,6 +547,7 @@ def upsert_data_odbc(dst_conn, table, rows, primary_key, insert_only=False):
                                     try:
                                         cursor.execute(insert_sql, row_params)
                                     except Exception as row_error:
+                                        insert_failures += 1
                                         Logger.error(f"Row-level insert failed in {table}", exc=row_error)
                                 continue
 
@@ -546,7 +560,8 @@ def upsert_data_odbc(dst_conn, table, rows, primary_key, insert_only=False):
                                 Logger.error(f"Batch insert failed in {table}, trying final row-by-row fallback...", exc=sub_error)
 
                                 fallback_cursor = dst_conn.cursor()
-                                if identity_cols:
+                                use_identity_insert = bool(identity_cols) and not insert_only
+                                if use_identity_insert:
                                     try:
                                         fallback_cursor.execute(f"SET IDENTITY_INSERT {table_full} ON")
                                     except Exception:
@@ -555,11 +570,12 @@ def upsert_data_odbc(dst_conn, table, rows, primary_key, insert_only=False):
                                     try:
                                         fallback_cursor.execute(insert_sql, row_params)
                                     except Exception as row_error:
+                                        insert_failures += 1
                                         for col_name, val in zip(columns, row_params):
                                             if isinstance(val, str) and len(val) > 100:
                                                 Logger.error(f"  Suspect col [{col_name}] len={len(val)}: {val[:80]}...")
                                         Logger.error(f"Row-level insert failed in {table}", exc=row_error)
-                                if identity_cols:
+                                if use_identity_insert:
                                     try:
                                         fallback_cursor.execute(f"SET IDENTITY_INSERT {table_full} OFF")
                                     except Exception:
@@ -567,7 +583,14 @@ def upsert_data_odbc(dst_conn, table, rows, primary_key, insert_only=False):
                                 fallback_cursor.close()
 
             dst_conn.commit()
-            Logger.success(f"Upserted {len(rows)} rows into {table_full} (U:{len(update_params)} I:{len(insert_params)})")
+            inserted_ok = len(insert_params) - insert_failures
+            if insert_failures:
+                Logger.error(
+                    f"Upsert incomplete for {table_full}: {insert_failures} of {len(insert_params)} insert(s) FAILED "
+                    f"(U:{len(update_params)} I:{inserted_ok})"
+                )
+            else:
+                Logger.success(f"Upserted {len(rows)} rows into {table_full} (U:{len(update_params)} I:{inserted_ok})")
 
         finally:
             if identity_cols:
@@ -602,6 +625,8 @@ def sync_schema_direct(src_conn, dst_conn, schema, table):
 
     sql_updates = []
     for col, meta in src_cols.items():
+        if meta["type"] in ("timestamp", "rowversion"):
+            continue
         if col not in dst_cols:
             sql_updates.append(f"ALTER TABLE [{schema}].[{table}] ADD [{col}] {to_sql_type(meta)}")
 
@@ -627,16 +652,48 @@ def sync_schema_direct(src_conn, dst_conn, schema, table):
     Logger.success(f"Schema synchronized successfully for {table}")
 
 
+def get_source_select_list(src_conn, schema, table):
+    cache_key = f"{schema}.{table}".lower()
+    if cache_key in SOURCE_SELECT_CACHE:
+        return SOURCE_SELECT_CACHE[cache_key]
+
+    cursor = src_conn.cursor()
+    try:
+        cursor.execute(
+            "SELECT COLUMN_NAME, DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS "
+            "WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? ORDER BY ORDINAL_POSITION",
+            (schema, table),
+        )
+        cols = cursor.fetchall()
+    finally:
+        try: cursor.close()
+        except: pass
+
+    if not cols:
+        return "*"
+
+    keep = [r[0] for r in cols if (r[1] or "").lower() not in ("timestamp", "rowversion")]
+    skipped = [r[0] for r in cols if (r[1] or "").lower() in ("timestamp", "rowversion")]
+    if skipped:
+        Logger.info(f"Excluding rowversion column(s) from {schema}.{table}: {', '.join(skipped)}")
+
+    select_list = ", ".join(f"[{c}]" for c in keep) if keep else "*"
+    SOURCE_SELECT_CACHE[cache_key] = select_list
+    return select_list
+
+
 def fetch_rows_by_pks(src_conn, schema, table, pk_col, pks):
     if not pks:
         return []
+
+    select_list = get_source_select_list(src_conn, schema, table)
 
     results = []
     chunk_size = 2000
     for i in range(0, len(pks), chunk_size):
         chunk = pks[i : i + chunk_size]
         placeholders = ", ".join(["?" for _ in chunk])
-        query = f"SELECT * FROM [{schema}].[{table}] WHERE [{pk_col}] IN ({placeholders})"
+        query = f"SELECT {select_list} FROM [{schema}].[{table}] WHERE [{pk_col}] IN ({placeholders})"
 
         cursor = src_conn.cursor()
         try:

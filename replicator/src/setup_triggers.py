@@ -199,6 +199,14 @@ def ensure_audit_log_table(conn):
     END
     """)
 
+    cursor.execute("""
+    IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID('dbo.sync_audit_log') AND name = 'retry_count')
+    BEGIN
+        ALTER TABLE dbo.sync_audit_log ADD retry_count INT NOT NULL DEFAULT 0
+        PRINT 'Added retry_count column to sync_audit_log table'
+    END
+    """)
+
 
     cursor.execute("""
     IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'IX_sync_audit_log_table' AND object_id = OBJECT_ID('dbo.sync_audit_log'))

@@ -35,6 +35,26 @@ try:
 except ImportError:
     from .manual_sync import run_manual_sync
 
+try:
+    from fk_remap import (
+        discover_fk_relationships, topological_order,
+        build_parent_id_map, remap_child_fks,
+    )
+except ImportError:
+    from .fk_remap import (
+        discover_fk_relationships, topological_order,
+        build_parent_id_map, remap_child_fks,
+    )
+
+
+def _row_value_ci(row, col):
+    key = None
+    for k in row.keys():
+        if k.lower() == col.lower():
+            key = k
+            break
+    return row.get(key) if key is not None else None
+
 load_dotenv()
 
 POLL_INTERVAL = float(os.getenv("POLL_INTERVAL", "1.0"))
@@ -44,6 +64,8 @@ TABLE_SCAN_INTERVAL = float(os.getenv("TABLE_SCAN_INTERVAL", "300.0"))
 
 AUDIT_LOG_RETENTION_DAYS = int(os.getenv("AUDIT_LOG_RETENTION_DAYS", "7"))
 AUDIT_LOG_CLEANUP_INTERVAL = float(os.getenv("AUDIT_LOG_CLEANUP_INTERVAL", "3600.0"))
+
+MAX_FK_DEFER_RETRIES = int(os.getenv("MAX_FK_DEFER_RETRIES", "10"))
 
 
 def start_replicator():
@@ -165,23 +187,33 @@ def start_replicator():
                     Logger.process(f"[{source_id}] Processing batch of {len(logs)} changes (Total pending: {pending_fmt})")
 
                     changes_by_table = {}
-                    log_ids = []
+                    table_pk_logs = {}
+                    processed_log_ids = set()
+                    deferred_log_ids = set()
 
                     for log_id, table, pk, op in logs:
-                        log_ids.append(log_id)
                         if table.startswith("sys") or table.startswith("MSr") or table == "sync_audit_log" or table == "sync_dedup_tracker":
+                            processed_log_ids.add(log_id)
                             continue
                         if table in excluded:
+                            processed_log_ids.add(log_id)
                             continue
 
                         if table not in changes_by_table:
                             changes_by_table[table] = {"I": set(), "U": set()}
+                            table_pk_logs[table] = {}
 
                         op_mapped = "I" if config.insert_only and op == "U" else op
                         if op_mapped in changes_by_table[table]:
                             changes_by_table[table][op_mapped].add(pk)
+                        table_pk_logs[table].setdefault(str(pk), []).append(log_id)
 
-                    for table, ops in changes_by_table.items():
+                    machine_id = get_source_id()
+                    fk_map = discover_fk_relationships(dst_conn, list(changes_by_table.keys()), cache_key=source_id)
+                    ordered_tables = topological_order(list(changes_by_table.keys()), fk_map)
+
+                    for table in ordered_tables:
+                        ops = changes_by_table[table]
                         if table not in table_metadata:
                             table_metadata[table] = {"last_schema_sync": 0}
 
@@ -190,32 +222,94 @@ def start_replicator():
                             pk_cache[table] = pk_col if pk_col else "ID"
 
                         pk_col = pk_cache[table]
+                        pk_logs = table_pk_logs.get(table, {})
 
                         upsert_pks = ops["I"].union(ops["U"])
-                        if upsert_pks:
-                            rows = fetch_rows_by_pks(src_conn, "dbo", table, pk_col, list(upsert_pks))
-                            if rows:
-                                valid_rows = list(rows)
+                        if not upsert_pks:
+                            continue
 
-                                if valid_rows:
-                                    machine_id = get_source_id()
-                                    for r in valid_rows:
-                                        r['sync_source_id'] = machine_id
-                                    upsert_data_odbc(dst_conn, table, valid_rows, pk_col, insert_only=config.insert_only)
-                                    Logger.info(f"[{machine_id}] Table: {table:<25} | Sync: {len(valid_rows):>4} rows | Status: [OK]", indent=1)
+                        rows = fetch_rows_by_pks(src_conn, "dbo", table, pk_col, list(upsert_pks))
+                        deferred_pks = set()
 
-                    if log_ids:
+                        if rows:
+                            valid_rows = list(rows)
+                            for r in valid_rows:
+                                r['sync_source_id'] = machine_id
+
+                            links = fk_map.get(table.lower())
+                            if config.insert_only and links:
+                                id_maps = {}
+                                for fk_col, parent_table, parent_pk_col in links:
+                                    needed = {_row_value_ci(r, fk_col) for r in valid_rows}
+                                    needed.discard(None)
+                                    id_maps[parent_table.lower()] = build_parent_id_map(
+                                        dst_conn, parent_table, parent_pk_col, machine_id, needed
+                                    )
+                                ready_rows, deferred_rows = remap_child_fks(valid_rows, links, id_maps)
+                                deferred_pks = {str(_row_value_ci(r, pk_col)) for r in deferred_rows}
+                                valid_rows = ready_rows
+                                if deferred_rows:
+                                    Logger.info(
+                                        f"[{machine_id}] Table: {table:<25} | Deferred: {len(deferred_rows):>4} rows (parent not on target yet)",
+                                        indent=1,
+                                    )
+
+                            if valid_rows:
+                                upsert_data_odbc(dst_conn, table, valid_rows, pk_col, insert_only=config.insert_only)
+                                Logger.info(f"[{machine_id}] Table: {table:<25} | Sync: {len(valid_rows):>4} rows | Status: [OK]", indent=1)
+
+                        for pk_str, ids in pk_logs.items():
+                            if pk_str in deferred_pks:
+                                deferred_log_ids.update(ids)
+                                continue
+                            processed_log_ids.update(ids)
+
+                    if processed_log_ids:
                         update_cursor = src_conn.cursor()
+                        log_id_list = list(processed_log_ids)
                         chunk_size = 1000
-                        for i in range(0, len(log_ids), chunk_size):
-                            chunk = log_ids[i:i+chunk_size]
+                        for i in range(0, len(log_id_list), chunk_size):
+                            chunk = log_id_list[i:i+chunk_size]
                             placeholders = ",".join("?" for _ in chunk)
                             update_cursor.execute(f"UPDATE dbo.sync_audit_log SET status = 'processed', processed_at = GETDATE(), source_id = ? WHERE log_id IN ({placeholders})", [source_id] + chunk)
                         src_conn.commit()
                         update_cursor.close()
 
+                    if deferred_log_ids:
+                        defer_cursor = src_conn.cursor()
+                        defer_id_list = list(deferred_log_ids)
+                        chunk_size = 1000
+                        for i in range(0, len(defer_id_list), chunk_size):
+                            chunk = defer_id_list[i:i+chunk_size]
+                            placeholders = ",".join("?" for _ in chunk)
+                            defer_cursor.execute(
+                                f"UPDATE dbo.sync_audit_log SET retry_count = retry_count + 1 "
+                                f"WHERE log_id IN ({placeholders})",
+                                chunk,
+                            )
+                            defer_cursor.execute(
+                                f"UPDATE dbo.sync_audit_log SET status = 'deferred_max', processed_at = GETDATE(), source_id = ? "
+                                f"WHERE log_id IN ({placeholders}) AND retry_count >= ?",
+                                [source_id] + chunk + [MAX_FK_DEFER_RETRIES],
+                            )
+                        src_conn.commit()
+                        defer_cursor.execute(
+                            "SELECT COUNT(*) FROM dbo.sync_audit_log WHERE status = 'deferred_max'"
+                        )
+                        gave_up = defer_cursor.fetchone()[0]
+                        defer_cursor.close()
+                        if gave_up:
+                            Logger.warn(
+                                f"[{source_id}] {gave_up} orphan row(s) parked as 'deferred_max' "
+                                f"(parent never arrived after {MAX_FK_DEFER_RETRIES} retries)."
+                            )
+
                     cursor.close()
-                    Logger.success(f"[{source_id}] Synced batch of {len(logs)} logs")
+                    deferred_count = len(deferred_log_ids)
+                    if deferred_count > 0:
+                        Logger.success(f"[{source_id}] Processed {len(processed_log_ids)} logs, deferred {deferred_count} for next poll")
+                    else:
+                        Logger.success(f"[{source_id}] Synced batch of {len(logs)} logs")
 
                 except Exception as src_err:
                     Logger.error(f"Connection lost or database error for source {source_id}", exc=src_err)
