@@ -1,4 +1,4 @@
-"""
+﻿"""
 Build script to create CDC_Replicator.exe
 This replaces the old executable with our new multi-source version
 """
