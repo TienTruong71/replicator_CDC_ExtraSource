@@ -431,10 +431,15 @@ def upsert_data_odbc(dst_conn, table, rows, primary_key, insert_only=False):
                         if len(row[cl]) > limit:
                             row[cl] = row[cl][:limit]
 
-            has_source_id = 'sync_source_id' in [c.lower() for c in columns]
+            cols_lower_all = [c.lower() for c in columns]
+            has_source_id = 'sync_source_id' in cols_lower_all
+            has_record_id = 'source_record_id' in cols_lower_all
             col_list = ", ".join(f"[{c}]" for c in columns)
             placeholders_vals = ", ".join(["?" for _ in columns])
+            update_by_record_id = insert_only and has_source_id and has_record_id
             update_cols = [c for c in columns if c.lower() != pk_col.lower() and c.lower() not in identity_cols and c.lower() != 'sync_source_id']
+            if update_by_record_id:
+                update_cols = [c for c in update_cols if c.lower() != 'source_record_id']
 
             pks_in_batch = []
             for row in rows:
@@ -442,9 +447,29 @@ def upsert_data_odbc(dst_conn, table, rows, primary_key, insert_only=False):
                 pks_in_batch.append(str(pk_val))
 
             if insert_only:
+                existing_rec_ids = set()
+                if update_by_record_id:
+                    source_id_val = rows[0].get('sync_source_id')
+                    rec_ids = [str(r.get('source_record_id')) for r in rows if r.get('source_record_id') is not None]
+                    chunk_size_check = 1000
+                    for i in range(0, len(rec_ids), chunk_size_check):
+                        chunk = rec_ids[i:i + chunk_size_check]
+                        placeholders_rec = ", ".join(["?" for _ in chunk])
+                        cursor.execute(
+                            f"SELECT [source_record_id] FROM {table_full} "
+                            f"WHERE [sync_source_id] = ? AND [source_record_id] IN ({placeholders_rec})",
+                            (source_id_val,) + tuple(chunk),
+                        )
+                        existing_rec_ids.update({str(r[0]) for r in cursor.fetchall()})
+
                 for row in rows:
-                    insert_values = [row.get(c) for c in columns]
-                    insert_params.append(tuple(insert_values))
+                    rec_id = row.get('source_record_id')
+                    if update_by_record_id and rec_id is not None and str(rec_id) in existing_rec_ids:
+                        update_values = [row.get(c) for c in update_cols]
+                        update_params.append(tuple(update_values + [row.get('sync_source_id'), rec_id]))
+                    else:
+                        insert_values = [row.get(c) for c in columns]
+                        insert_params.append(tuple(insert_values))
             else:
                 existing_pks = set()
                 chunk_size_check = 1000
@@ -477,7 +502,9 @@ def upsert_data_odbc(dst_conn, table, rows, primary_key, insert_only=False):
 
             if update_params and update_cols:
                 set_clauses_exec = ", ".join([f"[{c}] = ?" for c in update_cols])
-                if has_source_id:
+                if update_by_record_id:
+                    update_sql = f"UPDATE {table_full} SET {set_clauses_exec} WHERE [sync_source_id] = ? AND [source_record_id] = ?"
+                elif has_source_id:
                     update_sql = f"UPDATE {table_full} SET {set_clauses_exec} WHERE [{pk_col}] = ? AND [sync_source_id] = ?"
                 else:
                     update_sql = f"UPDATE {table_full} SET {set_clauses_exec} WHERE [{pk_col}] = ?"
@@ -593,7 +620,7 @@ def upsert_data_odbc(dst_conn, table, rows, primary_key, insert_only=False):
                 Logger.success(f"Upserted {len(rows)} rows into {table_full} (U:{len(update_params)} I:{inserted_ok})")
 
         finally:
-            if identity_cols:
+            if identity_cols and not insert_only:
                 try:
                     cursor.execute(f"SET IDENTITY_INSERT {table_full} OFF")
                 except Exception:

@@ -129,15 +129,14 @@ def setup_single_table(conn, table: str, insert_only: bool = False) -> bool:
         END
         """)
 
-        if not insert_only:
-            cursor.execute(f"""
-            CREATE TRIGGER dbo.[trig_cdc_{clean_table}_UPD] ON dbo.[{table}] AFTER UPDATE AS
-            BEGIN
-                SET NOCOUNT ON;
-                INSERT INTO dbo.sync_audit_log (table_name, pk_value, operation, status)
-                SELECT '{table}', CAST([{pk_col}] AS NVARCHAR(MAX)), 'U', 'pending' FROM inserted;
-            END
-            """)
+        cursor.execute(f"""
+        CREATE TRIGGER dbo.[trig_cdc_{clean_table}_UPD] ON dbo.[{table}] AFTER UPDATE AS
+        BEGIN
+            SET NOCOUNT ON;
+            INSERT INTO dbo.sync_audit_log (table_name, pk_value, operation, status)
+            SELECT '{table}', CAST([{pk_col}] AS NVARCHAR(MAX)), 'U', 'pending' FROM inserted;
+        END
+        """)
 
         conn.commit()
         Logger.info(f"Triggers for {table} successfully created.", indent=1)
@@ -269,8 +268,8 @@ def auto_discover_new_tables(conn, prefix: str, insert_only: bool = False):
     cursor = conn.cursor()
     all_tables = _list_source_tables(cursor, prefix)
 
-    expected_count = 1 if insert_only else 2
-    
+    expected_count = 2
+
     cursor.execute(f"""
         SELECT OBJECT_NAME(parent_id)
         FROM sys.triggers
@@ -295,7 +294,7 @@ def get_monitored_tables(conn, prefix: str, insert_only: bool = False):
     cursor = conn.cursor()
     all_tables = _list_source_tables(cursor, prefix)
 
-    expected_count = 1 if insert_only else 2
+    expected_count = 2
 
     cursor.execute(f"""
         SELECT OBJECT_NAME(parent_id)

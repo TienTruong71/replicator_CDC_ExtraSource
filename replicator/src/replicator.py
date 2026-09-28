@@ -203,9 +203,8 @@ def start_replicator():
                             changes_by_table[table] = {"I": set(), "U": set()}
                             table_pk_logs[table] = {}
 
-                        op_mapped = "I" if config.insert_only and op == "U" else op
-                        if op_mapped in changes_by_table[table]:
-                            changes_by_table[table][op_mapped].add(pk)
+                        if op in changes_by_table[table]:
+                            changes_by_table[table][op].add(pk)
                         table_pk_logs[table].setdefault(str(pk), []).append(log_id)
 
                     machine_id = get_source_id()

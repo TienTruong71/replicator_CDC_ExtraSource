@@ -194,6 +194,12 @@ class MultiSourceConfig:
         
         insert_only = insert_only_str.lower() in ("true", "1", "yes", "on")
 
+        if not source_id or source_id == "UNKNOWN":
+            Logger.warn(
+                f"SOURCE_ID is not set (got '{source_id}'). Every station must have a "
+                f"UNIQUE SOURCE_ID — sharing one lets stations overwrite each other's rows on the target."
+            )
+
         return SourceConfig(
             prefix=prefix,
             host=host,
