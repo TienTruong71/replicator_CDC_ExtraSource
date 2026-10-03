@@ -1,5 +1,5 @@
 
-USE [TARGET_DB];  
+USE [QC];
 GO
 SET NOCOUNT ON;
 
