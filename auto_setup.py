@@ -230,11 +230,53 @@ def show_final_status():
 
 
 def main():
-    if len(sys.argv) > 1 and sys.argv[1] == "--manual":
-        print("Manual mode - use setup.py for step-by-step control")
-        return
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="CDC_Replicator",
+        description="Multi-Source CDC Replicator - auto setup and run",
+    )
+    parser.add_argument("--manual", action="store_true",
+                        help="Print a pointer to setup.py and exit")
+    parser.add_argument("--setup-triggers", action="store_true",
+                        help="Install or refresh CDC triggers, then exit")
+    parser.add_argument("--sync-missing", action="store_true",
+                        help="Queue rows missing from the target, then exit")
+    parser.add_argument("--table", help="Restrict --sync-missing to one table")
+    parser.add_argument("--status", action="store_true",
+                        help="Show trigger and row-count status, then exit")
+    parser.add_argument("--run", action="store_true",
+                        help="Start the replication loop without the setup check")
+    parser.add_argument("--no-pause", action="store_true",
+                        help="Do not wait for Enter before closing the window")
 
     try:
+        args = parser.parse_args()
+    except SystemExit as exit_err:
+        pause_before_exit()
+        raise exit_err
+
+    try:
+        if args.manual:
+            print("Manual mode - use setup.py for step-by-step control")
+            return
+
+        if args.status:
+            show_final_status()
+            return
+
+        if args.setup_triggers:
+            setup_triggers()
+            return
+
+        if args.sync_missing:
+            run_manual_sync(args.table)
+            return
+
+        if args.run:
+            start_replicator()
+            return
+
         auto_run()
     except KeyboardInterrupt:
         print("\nStopped by user.")
@@ -243,7 +285,8 @@ def main():
         import traceback
         traceback.print_exc()
     finally:
-        pause_before_exit()
+        if not args.no_pause:
+            pause_before_exit()
 
 if __name__ == "__main__":
     main()

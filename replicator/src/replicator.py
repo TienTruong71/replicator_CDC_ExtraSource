@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 try:
     from db_utils import (
         connect_db, ensure_table_exists, get_primary_key,
+        get_key_columns, get_trigger_key_column,
         upsert_data_odbc,
         sync_schema_direct, fetch_rows_by_pks,
         get_source_id, claim_source_identity,
@@ -17,6 +18,7 @@ try:
 except ImportError:
     from .db_utils import (
         connect_db, ensure_table_exists, get_primary_key,
+        get_key_columns, get_trigger_key_column,
         upsert_data_odbc,
         sync_schema_direct, fetch_rows_by_pks,
         get_source_id, claim_source_identity,
@@ -39,11 +41,13 @@ try:
     from fk_remap import (
         discover_fk_relationships, topological_order,
         build_parent_id_map, remap_child_fks,
+        build_parent_existing_set, defer_children_missing_parents,
     )
 except ImportError:
     from .fk_remap import (
         discover_fk_relationships, topological_order,
         build_parent_id_map, remap_child_fks,
+        build_parent_existing_set, defer_children_missing_parents,
     )
 
 
@@ -217,18 +221,40 @@ def start_replicator():
                             table_metadata[table] = {"last_schema_sync": 0}
 
                         if table not in pk_cache:
-                            pk_col = get_primary_key(table, prefix)
-                            pk_cache[table] = pk_col if pk_col else "ID"
+                            trig_col = get_trigger_key_column(table, prefix)
+                            resolved = get_primary_key(table, prefix)
+                            key_cols = get_key_columns(table, prefix)
+                            audit_col = trig_col or resolved or "ID"
+                            if trig_col and resolved and trig_col.lower() != resolved.lower():
+                                Logger.warn(
+                                    f"[{source_id}] {table}: trigger writes [{trig_col}] but resolver "
+                                    f"picked [{resolved}]; using [{trig_col}] to read the audit log."
+                                )
+                            pk_cache[table] = {
+                                "audit_col": audit_col,
+                                "pk_col": resolved or audit_col,
+                                "key_cols": key_cols,
+                            }
+                            if len(key_cols) > 1:
+                                Logger.info(
+                                    f"[{source_id}] {table}: composite key ({', '.join(key_cols)}) "
+                                    f"— matching target rows on all {len(key_cols)} columns.",
+                                    indent=1,
+                                )
 
-                        pk_col = pk_cache[table]
+                        keyinfo = pk_cache[table]
+                        audit_col = keyinfo["audit_col"]
+                        pk_col = keyinfo["pk_col"]
+                        key_cols = keyinfo["key_cols"]
                         pk_logs = table_pk_logs.get(table, {})
 
                         upsert_pks = ops["I"].union(ops["U"])
                         if not upsert_pks:
                             continue
 
-                        rows = fetch_rows_by_pks(src_conn, "dbo", table, pk_col, list(upsert_pks))
+                        rows = fetch_rows_by_pks(src_conn, "dbo", table, audit_col, list(upsert_pks))
                         deferred_pks = set()
+                        failed_pks = set()
 
                         if rows:
                             valid_rows = list(rows)
@@ -236,16 +262,29 @@ def start_replicator():
                                 r['sync_source_id'] = machine_id
 
                             links = fk_map.get(table.lower())
-                            if config.insert_only and links:
-                                id_maps = {}
-                                for fk_col, parent_table, parent_pk_col in links:
-                                    needed = {_row_value_ci(r, fk_col) for r in valid_rows}
-                                    needed.discard(None)
-                                    id_maps[parent_table.lower()] = build_parent_id_map(
-                                        dst_conn, parent_table, parent_pk_col, machine_id, needed
+                            if links:
+                                if config.insert_only:
+                                    id_maps = {}
+                                    for fk_col, parent_table, parent_pk_col in links:
+                                        needed = {_row_value_ci(r, fk_col) for r in valid_rows}
+                                        needed.discard(None)
+                                        id_maps[parent_table.lower()] = build_parent_id_map(
+                                            dst_conn, parent_table, parent_pk_col, machine_id, needed
+                                        )
+                                    ready_rows, deferred_rows = remap_child_fks(valid_rows, links, id_maps)
+                                else:
+                                    parent_sets = {}
+                                    for fk_col, parent_table, parent_pk_col in links:
+                                        needed = {_row_value_ci(r, fk_col) for r in valid_rows}
+                                        needed.discard(None)
+                                        parent_sets[parent_table.lower()] = build_parent_existing_set(
+                                            dst_conn, parent_table, parent_pk_col, needed
+                                        )
+                                    ready_rows, deferred_rows = defer_children_missing_parents(
+                                        valid_rows, links, parent_sets
                                     )
-                                ready_rows, deferred_rows = remap_child_fks(valid_rows, links, id_maps)
-                                deferred_pks = {str(_row_value_ci(r, pk_col)) for r in deferred_rows}
+
+                                deferred_pks = {str(_row_value_ci(r, audit_col)) for r in deferred_rows}
                                 valid_rows = ready_rows
                                 if deferred_rows:
                                     Logger.info(
@@ -254,11 +293,27 @@ def start_replicator():
                                     )
 
                             if valid_rows:
-                                upsert_data_odbc(dst_conn, table, valid_rows, pk_col, insert_only=config.insert_only)
-                                Logger.info(f"[{machine_id}] Table: {table:<25} | Sync: {len(valid_rows):>4} rows | Status: [OK]", indent=1)
+                                failed_pks = upsert_data_odbc(
+                                    dst_conn, table, valid_rows, pk_col,
+                                    insert_only=config.insert_only,
+                                    key_columns=key_cols,
+                                    audit_key_col=audit_col,
+                                ) or set()
+                                written = len(valid_rows) - len(failed_pks)
+                                if failed_pks:
+                                    Logger.warn(
+                                        f"[{machine_id}] Table: {table:<25} | Sync: {written:>4}/{len(valid_rows)} rows "
+                                        f"| Status: [FAILED {len(failed_pks)}]",
+                                        indent=1,
+                                    )
+                                else:
+                                    Logger.info(
+                                        f"[{machine_id}] Table: {table:<25} | Sync: {written:>4} rows | Status: [OK]",
+                                        indent=1,
+                                    )
 
                         for pk_str, ids in pk_logs.items():
-                            if pk_str in deferred_pks:
+                            if pk_str in deferred_pks or pk_str in failed_pks:
                                 deferred_log_ids.update(ids)
                                 continue
                             processed_log_ids.update(ids)

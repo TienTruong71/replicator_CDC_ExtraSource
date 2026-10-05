@@ -22,9 +22,48 @@ def get_source_prefix() -> str:
     return "SOURCE"
 
 
+def get_key_override(table_name: str, prefix: str = "SOURCE"):
+    """Return the key columns declared for a table in {prefix}_KEY_OVERRIDE, else [].
+
+    Format is "Table:Col" or "Table:ColA+ColB", entries separated by commas. This
+    names a key the catalog does not declare, so a table with no primary key and no
+    unique index can still be synced without altering the source.
+
+    The caller must be sure those columns really are unique: nothing enforces it,
+    so two source rows sharing the value are treated as one and the second
+    overwrites the first on the target.
+    """
+    load_dotenv()
+    raw = os.getenv(f"{prefix}_KEY_OVERRIDE", "")
+    if not raw.strip():
+        return []
+
+    table_clean = table_name.split(".")[-1].replace("[", "").replace("]", "").lower()
+    for entry in raw.split(","):
+        if ":" not in entry:
+            continue
+        name, cols = entry.split(":", 1)
+        if name.strip().lower() != table_clean:
+            continue
+        parsed = [c.strip() for c in cols.split("+") if c.strip()]
+        if parsed:
+            return parsed
+    return []
+
+
 def get_source_id() -> str:
     load_dotenv()
     return os.getenv("SOURCE_ID", "UNKNOWN").strip()
+
+
+def _row_val_ci(row, col):
+    """Case-insensitive lookup of a column value in a row dict."""
+    if col is None or row is None:
+        return None
+    for k in row.keys():
+        if k.lower() == col.lower():
+            return row.get(k)
+    return None
 
 
 def cleanup_processed_audit_log(conn, retention_days: int) -> int:
@@ -232,7 +271,134 @@ def ensure_table_exists(src_conn, dst_conn, table_name: str):
         Logger.warn(f"Could not create unique index on dbo.[{table_name_clean}]: {e}")
 
 
+def get_key_columns(table_name: str, prefix: str, cursor=None):
+    """Return the full row identity as an ordered list of column names.
+
+    Declared PRIMARY KEY first, then the columns of any unique index. Unlike
+    get_primary_key this never collapses a composite key to one column, which is
+    what let UPDATE statements push one row onto another row's key.
+
+    Returns [] when the table has neither, and the caller then falls back to the
+    single audit-log column — rows sharing that value cannot be told apart.
+
+    {prefix}_KEY_OVERRIDE wins over both, for tables whose key the catalog does
+    not declare.
+    """
+    override = get_key_override(table_name, prefix)
+    if override:
+        return override
+
+    close_cursor = False
+    if not cursor:
+        conn = connect_db(prefix)
+        cursor = conn.cursor()
+        close_cursor = True
+
+    table_name_clean = table_name.split(".")[-1]
+    try:
+        cursor.execute(
+            """
+            SELECT c.COLUMN_NAME
+            FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
+            JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE c
+                ON tc.CONSTRAINT_NAME = c.CONSTRAINT_NAME
+            WHERE tc.TABLE_NAME = ?
+              AND tc.CONSTRAINT_TYPE = 'PRIMARY KEY'
+            ORDER BY c.ORDINAL_POSITION
+            """,
+            (table_name_clean,),
+        )
+        pk_cols = [r[0] for r in cursor.fetchall()]
+        if pk_cols:
+            return pk_cols
+
+        cursor.execute(
+            """
+            SELECT TOP 1 ind.index_id
+            FROM sys.indexes ind
+            WHERE ind.is_unique = 1
+              AND ind.has_filter = 0
+              AND ind.object_id = OBJECT_ID('dbo.' + ?)
+            ORDER BY ind.type_desc DESC
+            """,
+            (table_name_clean,),
+        )
+        row = cursor.fetchone()
+        if not row:
+            return []
+
+        cursor.execute(
+            """
+            SELECT col.name
+            FROM sys.index_columns ic
+            JOIN sys.columns col
+              ON ic.object_id = col.object_id AND ic.column_id = col.column_id
+            WHERE ic.object_id = OBJECT_ID('dbo.' + ?)
+              AND ic.index_id = ?
+              AND ic.is_included_column = 0
+            ORDER BY ic.key_ordinal
+            """,
+            (table_name_clean, row[0]),
+        )
+        return [r[0] for r in cursor.fetchall()]
+    except Exception as e:
+        Logger.warn(f"Could not read key columns for {table_name_clean}: {e}")
+        return []
+    finally:
+        if close_cursor:
+            try:
+                cursor.connection.close()
+            except Exception:
+                pass
+
+
+def get_trigger_key_column(table_name: str, prefix: str, cursor=None):
+    """Return the column the installed CDC trigger actually writes into pk_value.
+
+    The audit log carries one value per change, so the replicator must match on
+    whichever column the trigger used — not on whatever the resolver would pick
+    independently. These disagreed in practice on composite-key tables.
+    Returns None when no trigger is installed or its shape is unrecognized.
+    """
+    close_cursor = False
+    if not cursor:
+        conn = connect_db(prefix)
+        cursor = conn.cursor()
+        close_cursor = True
+
+    table_name_clean = table_name.split(".")[-1]
+    try:
+        cursor.execute(
+            """
+            SELECT m.definition
+            FROM sys.triggers tr
+            JOIN sys.sql_modules m ON m.object_id = tr.object_id
+            WHERE tr.parent_id = OBJECT_ID('dbo.' + ?)
+              AND tr.name LIKE 'trig_cdc_%'
+            """,
+            (table_name_clean,),
+        )
+        for (body,) in cursor.fetchall():
+            m = re.search(r"CAST\(\s*\[([^\]]+)\]\s+AS\s+NVARCHAR", body or "", re.I)
+            if m:
+                return m.group(1)
+        return None
+    except Exception as e:
+        Logger.warn(f"Could not read trigger key column for {table_name_clean}: {e}")
+        return None
+    finally:
+        if close_cursor:
+            try:
+                cursor.connection.close()
+            except Exception:
+                pass
+
+
 def get_primary_key(table_name: str, prefix: str, cursor=None):
+    override = get_key_override(table_name, prefix)
+    if override:
+        return override[0]
+
     close_cursor = False
     if not cursor:
         conn = connect_db(prefix)
@@ -248,6 +414,7 @@ def get_primary_key(table_name: str, prefix: str, cursor=None):
             ON tc.CONSTRAINT_NAME = c.CONSTRAINT_NAME
         WHERE tc.TABLE_NAME = '{table_name_clean}'
           AND tc.CONSTRAINT_TYPE = 'PRIMARY KEY'
+        ORDER BY c.ORDINAL_POSITION
     """
     cursor.execute(pk_query)
     row = cursor.fetchone()
@@ -297,13 +464,24 @@ def get_primary_key(table_name: str, prefix: str, cursor=None):
     return row[0] if row else None
 
 
-def upsert_data_odbc(dst_conn, table, rows, primary_key, insert_only=False):
+def upsert_data_odbc(dst_conn, table, rows, primary_key, insert_only=False,
+                     key_columns=None, audit_key_col=None):
     """
     Safe UPSERT for SQL Server via ODBC.
     Auto-casts data to correct SQL types to prevent ODBC 07006 errors.
+
+    key_columns: full declared key (list). When a table has a composite PK, every
+    key column must be excluded from UPDATE SET and used to match existing rows;
+    matching on one column alone pushes one row onto another row's key.
+    audit_key_col: the column whose values the audit log holds, used to report
+    which queued changes failed.
+
+    Returns a set of audit_key_col values whose rows did NOT land on the target,
+    so the caller can keep those audit rows pending instead of marking them
+    processed. An empty set means every row was written.
     """
     if not rows:
-        return
+        return set()
 
     normalized_rows = []
     datetime_columns = get_datetime_columns(dst_conn, table)
@@ -345,6 +523,9 @@ def upsert_data_odbc(dst_conn, table, rows, primary_key, insert_only=False):
     rows = [{k.lower(): v for k, v in r.items()} for r in normalized_rows]
     table_name_clean = table.replace("dbo.", "").replace("[", "").replace("]", "")
 
+    report_col = (audit_key_col or primary_key or "").lower()
+    report_vals = []
+
     try:
         cursor = dst_conn.cursor()
         cursor.fast_executemany = True
@@ -375,6 +556,16 @@ def upsert_data_odbc(dst_conn, table, rows, primary_key, insert_only=False):
         columns = list(rows[0].keys())
 
         pk_col = (primary_key or columns[0]).lower()
+
+        col_set = set(columns)
+        key_cols = [c.lower() for c in (key_columns or []) if c.lower() in col_set]
+        if not key_cols:
+            key_cols = [pk_col]
+        composite = len(key_cols) > 1
+
+
+        report_col = (audit_key_col or pk_col).lower()
+        report_vals = [_row_val_ci(r, report_col) for r in rows]
 
         if insert_only:
 
@@ -413,6 +604,9 @@ def upsert_data_odbc(dst_conn, table, rows, primary_key, insert_only=False):
             update_params = []
             insert_params = []
             insert_failures = 0
+            update_failures = 0
+            null_update_rows = []
+            failed_keys = set()
 
 
             cursor.execute(f"""
@@ -437,7 +631,16 @@ def upsert_data_odbc(dst_conn, table, rows, primary_key, insert_only=False):
             col_list = ", ".join(f"[{c}]" for c in columns)
             placeholders_vals = ", ".join(["?" for _ in columns])
             update_by_record_id = insert_only and has_source_id and has_record_id
-            update_cols = [c for c in columns if c.lower() != pk_col.lower() and c.lower() not in identity_cols and c.lower() != 'sync_source_id']
+            if insert_only:
+                key_cols_set = {pk_col}
+            else:
+                key_cols_set = set(key_cols)
+            update_cols = [
+                c for c in columns
+                if c.lower() not in key_cols_set
+                and c.lower() not in identity_cols
+                and c.lower() != 'sync_source_id'
+            ]
             if update_by_record_id:
                 update_cols = [c for c in update_cols if c.lower() != 'source_record_id']
 
@@ -445,6 +648,10 @@ def upsert_data_odbc(dst_conn, table, rows, primary_key, insert_only=False):
             for row in rows:
                 pk_val = row.get(pk_col)
                 pks_in_batch.append(str(pk_val))
+
+
+            update_keys = []
+            insert_keys = []
 
             if insert_only:
                 existing_rec_ids = set()
@@ -462,57 +669,95 @@ def upsert_data_odbc(dst_conn, table, rows, primary_key, insert_only=False):
                         )
                         existing_rec_ids.update({str(r[0]) for r in cursor.fetchall()})
 
-                for row in rows:
+                for idx, row in enumerate(rows):
                     rec_id = row.get('source_record_id')
+                    rep_val = report_vals[idx] if idx < len(report_vals) else None
                     if update_by_record_id and rec_id is not None and str(rec_id) in existing_rec_ids:
                         update_values = [row.get(c) for c in update_cols]
                         update_params.append(tuple(update_values + [row.get('sync_source_id'), rec_id]))
+                        update_keys.append(rep_val)
                     else:
                         insert_values = [row.get(c) for c in columns]
                         insert_params.append(tuple(insert_values))
+                        insert_keys.append(rep_val)
             else:
-                existing_pks = set()
-                chunk_size_check = 1000
-                for i in range(0, len(pks_in_batch), chunk_size_check):
-                    chunk = pks_in_batch[i : i + chunk_size_check]
-                    placeholders_pk = ", ".join(["?" for _ in chunk])
+                existing_keys = set()
+                key_select = ", ".join(f"[{c}]" for c in key_cols)
+                if composite:
+                    chunk_size_check = max(1, 2000 // max(1, len(key_cols)))
+                else:
+                    chunk_size_check = 1000
+
+                for i in range(0, len(rows), chunk_size_check):
+                    chunk_rows = rows[i : i + chunk_size_check]
+
+                    if composite:
+                        preds = []
+                        params = []
+                        for r in chunk_rows:
+                            parts = []
+                            for c in key_cols:
+                                v = r.get(c)
+                                if v is None:
+                                    parts.append(f"[{c}] IS NULL")
+                                else:
+                                    parts.append(f"[{c}] = ?")
+                                    params.append(v)
+                            preds.append("(" + " AND ".join(parts) + ")")
+                        where_sql = " OR ".join(preds)
+                    else:
+                        placeholders_pk = ", ".join(["?" for _ in chunk_rows])
+                        where_sql = f"[{key_cols[0]}] IN ({placeholders_pk})"
+                        params = [r.get(key_cols[0]) for r in chunk_rows]
 
                     if has_source_id:
                         source_id_val = rows[0].get('sync_source_id')
-                        check_query = f"SELECT [{pk_col}] FROM {table_full} WHERE [{pk_col}] IN ({placeholders_pk}) AND [sync_source_id] = ?"
-                        cursor.execute(check_query, tuple(chunk) + (source_id_val,))
+                        check_query = (
+                            f"SELECT {key_select} FROM {table_full} "
+                            f"WHERE ({where_sql}) AND [sync_source_id] = ?"
+                        )
+                        cursor.execute(check_query, tuple(params) + (source_id_val,))
                     else:
-                        check_query = f"SELECT [{pk_col}] FROM {table_full} WHERE [{pk_col}] IN ({placeholders_pk})"
-                        cursor.execute(check_query, tuple(chunk))
-                    existing_pks.update({str(r[0]) for r in cursor.fetchall()})
+                        check_query = f"SELECT {key_select} FROM {table_full} WHERE {where_sql}"
+                        cursor.execute(check_query, tuple(params))
+
+                    for r in cursor.fetchall():
+                        existing_keys.add(tuple(str(v) for v in r))
 
                 for row in rows:
-                    pk_val = row.get(pk_col)
-                    str_pk = str(pk_val)
+                    row_key = tuple(str(row.get(c)) for c in key_cols)
 
-                    if str_pk in existing_pks:
+                    if row_key in existing_keys:
                         update_values = [row.get(c) for c in update_cols]
+                        key_values = [row.get(c) for c in key_cols]
+                        if any(v is None for v in key_values):
+                            null_update_rows.append(row)
+                            continue
                         if has_source_id:
-                            update_params.append(tuple(update_values + [pk_val, row.get('sync_source_id')]))
+                            update_params.append(tuple(update_values + key_values + [row.get('sync_source_id')]))
                         else:
-                            update_params.append(tuple(update_values + [pk_val]))
+                            update_params.append(tuple(update_values + key_values))
+                        update_keys.append(row.get(report_col))
                     else:
                         insert_values = [row.get(c) for c in columns]
                         insert_params.append(tuple(insert_values))
+                        insert_keys.append(row.get(report_col))
 
             if update_params and update_cols:
                 set_clauses_exec = ", ".join([f"[{c}] = ?" for c in update_cols])
+                key_pred = " AND ".join(f"[{c}] = ?" for c in key_cols)
                 if update_by_record_id:
                     update_sql = f"UPDATE {table_full} SET {set_clauses_exec} WHERE [sync_source_id] = ? AND [source_record_id] = ?"
                 elif has_source_id:
-                    update_sql = f"UPDATE {table_full} SET {set_clauses_exec} WHERE [{pk_col}] = ? AND [sync_source_id] = ?"
+                    update_sql = f"UPDATE {table_full} SET {set_clauses_exec} WHERE {key_pred} AND [sync_source_id] = ?"
                 else:
-                    update_sql = f"UPDATE {table_full} SET {set_clauses_exec} WHERE [{pk_col}] = ?"
+                    update_sql = f"UPDATE {table_full} SET {set_clauses_exec} WHERE {key_pred}"
                 chunk_size_exec = 1000
                 use_fast_update = table_full not in FAST_EXEC_FAIL_CACHE
 
                 for i in range(0, len(update_params), chunk_size_exec):
                     chunk = update_params[i:i+chunk_size_exec]
+                    chunk_keys = update_keys[i:i+chunk_size_exec]
                     success = False
                     if use_fast_update:
                         try:
@@ -524,11 +769,39 @@ def upsert_data_odbc(dst_conn, table, rows, primary_key, insert_only=False):
                             Logger.warn(f"Switching {table} UPDATE to stable sync mode.")
 
                     if not success:
-                        for row_params in chunk:
+                        for row_params, rep_key in zip(chunk, chunk_keys):
                             try:
                                 cursor.execute(update_sql, row_params)
                             except Exception as row_error:
+                                update_failures += 1
+                                failed_keys.add(str(rep_key))
                                 Logger.error(f"Row-level update failed in {table}", exc=row_error)
+
+            if null_update_rows and update_cols:
+                set_clauses_exec = ", ".join([f"[{c}] = ?" for c in update_cols])
+                for row in null_update_rows:
+                    parts, key_vals = [], []
+                    for c in key_cols:
+                        v = row.get(c)
+                        if v is None:
+                            parts.append(f"[{c}] IS NULL")
+                        else:
+                            parts.append(f"[{c}] = ?")
+                            key_vals.append(v)
+                    where_clause = " AND ".join(parts)
+                    params = [row.get(c) for c in update_cols] + key_vals
+                    if has_source_id:
+                        where_clause += " AND [sync_source_id] = ?"
+                        params.append(row.get('sync_source_id'))
+                    try:
+                        cursor.execute(
+                            f"UPDATE {table_full} SET {set_clauses_exec} WHERE {where_clause}",
+                            params,
+                        )
+                    except Exception as row_error:
+                        update_failures += 1
+                        failed_keys.add(str(row.get(report_col)))
+                        Logger.error(f"Row-level update failed in {table}", exc=row_error)
 
             if insert_params:
                 cols_lower = [c.lower() for c in columns]
@@ -554,6 +827,7 @@ def upsert_data_odbc(dst_conn, table, rows, primary_key, insert_only=False):
 
                 for i in range(0, len(insert_params), chunk_size_exec):
                     chunk = insert_params[i:i+chunk_size_exec]
+                    chunk_keys = insert_keys[i:i+chunk_size_exec]
                     success = False
                     if use_fast:
                         try:
@@ -568,13 +842,15 @@ def upsert_data_odbc(dst_conn, table, rows, primary_key, insert_only=False):
                         sub_chunk_size = 200
                         for j in range(0, len(chunk), sub_chunk_size):
                             sub_chunk = chunk[j:j+sub_chunk_size]
+                            sub_keys = chunk_keys[j:j+sub_chunk_size]
 
                             if guard_insert:
-                                for row_params in sub_chunk:
+                                for row_params, rep_key in zip(sub_chunk, sub_keys):
                                     try:
                                         cursor.execute(insert_sql, row_params)
                                     except Exception as row_error:
                                         insert_failures += 1
+                                        failed_keys.add(str(rep_key))
                                         Logger.error(f"Row-level insert failed in {table}", exc=row_error)
                                 continue
 
@@ -593,11 +869,12 @@ def upsert_data_odbc(dst_conn, table, rows, primary_key, insert_only=False):
                                         fallback_cursor.execute(f"SET IDENTITY_INSERT {table_full} ON")
                                     except Exception:
                                         pass
-                                for row_params in sub_chunk:
+                                for row_params, rep_key in zip(sub_chunk, sub_keys):
                                     try:
                                         fallback_cursor.execute(insert_sql, row_params)
                                     except Exception as row_error:
                                         insert_failures += 1
+                                        failed_keys.add(str(rep_key))
                                         for col_name, val in zip(columns, row_params):
                                             if isinstance(val, str) and len(val) > 100:
                                                 Logger.error(f"  Suspect col [{col_name}] len={len(val)}: {val[:80]}...")
@@ -611,13 +888,22 @@ def upsert_data_odbc(dst_conn, table, rows, primary_key, insert_only=False):
 
             dst_conn.commit()
             inserted_ok = len(insert_params) - insert_failures
-            if insert_failures:
+            total_updates = len(update_params) + len(null_update_rows)
+            updated_ok = total_updates - update_failures
+            if insert_failures or update_failures:
+                parts = []
+                if insert_failures:
+                    parts.append(f"{insert_failures} of {len(insert_params)} insert(s)")
+                if update_failures:
+                    parts.append(f"{update_failures} of {total_updates} update(s)")
                 Logger.error(
-                    f"Upsert incomplete for {table_full}: {insert_failures} of {len(insert_params)} insert(s) FAILED "
-                    f"(U:{len(update_params)} I:{inserted_ok})"
+                    f"Upsert incomplete for {table_full}: {' and '.join(parts)} FAILED "
+                    f"(U:{updated_ok} I:{inserted_ok}); failed rows stay queued for retry"
                 )
             else:
-                Logger.success(f"Upserted {len(rows)} rows into {table_full} (U:{len(update_params)} I:{inserted_ok})")
+                Logger.success(f"Upserted {len(rows)} rows into {table_full} (U:{updated_ok} I:{inserted_ok})")
+
+            return failed_keys
 
         finally:
             if identity_cols and not insert_only:
@@ -631,7 +917,16 @@ def upsert_data_odbc(dst_conn, table, rows, primary_key, insert_only=False):
             dst_conn.rollback()
         except Exception:
             pass
-        Logger.error(f"Upsert failed for {table} — skipping this batch to avoid crash", exc=e)
+        Logger.error(f"Upsert failed for {table} — batch rolled back, rows stay queued for retry", exc=e)
+        try:
+            if report_vals:
+                return {str(v) for v in report_vals if v is not None}
+        except Exception:
+            pass
+        try:
+            return {str(_row_val_ci(r, report_col)) for r in rows}
+        except Exception:
+            return {str(_row_val_ci(r, primary_key)) for r in rows}
 
 
 def sync_schema_direct(src_conn, dst_conn, schema, table):

@@ -1,4 +1,4 @@
-#Check DB for insert_only mode 
+## Check DB for insert_only mode 
 
 USE [DB_NAME];
 GO
@@ -51,3 +51,33 @@ LEFT JOIN sys.default_constraints dc
        ON dc.parent_object_id = t.object_id AND dc.parent_column_id = r.column_id
 WHERE SCHEMA_NAME(t.schema_id) = 'dbo'
 ORDER BY insert_only_verdict DESC, key_source, t.name;
+
+
+
+## SQL Delete Trigger
+SELECT name FROM sys.triggers
+WHERE name LIKE 'trig_cdc_%' AND parent_class_desc = 'OBJECT_OR_COLUMN'
+
+DECLARE @sql NVARCHAR(MAX) = ''
+SELECT @sql += 'DROP TRIGGER dbo.[' + name + '];' + CHAR(10)
+FROM sys.triggers
+WHERE name LIKE 'trig_cdc_%' AND parent_class_desc = 'OBJECT_OR_COLUMN'
+EXEC sp_executesql @sql
+
+
+## Check Trigger exist
+
+SELECT
+    name,
+    OBJECT_NAME(parent_id) AS table_name,
+    parent_class_desc
+FROM sys.triggers
+ORDER BY name;
+
+
+=============
+CDC_Replicator.exe --sync-missing --table WH_Data_Main
+
+
+CDC_Replicator.exe --sync-missing --table WH_DryRoom_Slot
+CDC_Replicator.exe --sync-missing

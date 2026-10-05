@@ -47,7 +47,7 @@ def validate_schemas():
 
         from multi_source_config import MultiSourceConfig
         config_mgr = MultiSourceConfig()
-        sources = config_mgr.get_all_sources()
+        sources = config_mgr.load_sources()
 
         if len(sources) < 2:
             print("  Schema validation requires at least 2 sources.")

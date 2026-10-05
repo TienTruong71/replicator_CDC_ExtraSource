@@ -134,6 +134,70 @@ def build_parent_id_map(dst_conn, parent_table, parent_pk_col, source_id, needed
     return id_map
 
 
+def build_parent_existing_set(dst_conn, parent_table, parent_pk_col, needed_ids):
+    """Return which parent key values already exist on the target.
+
+    For upsert mode, where source keys are preserved on the target (IDENTITY_INSERT),
+    so a child's FK value is the parent's real key — no remap is needed, only a
+    presence check. build_parent_id_map cannot serve this: it looks up
+    source_record_id, which upsert mode never populates.
+    """
+    if not needed_ids:
+        return set()
+    table_clean = parent_table.replace('[', '').replace(']', '').replace('dbo.', '')
+    ids = [x for x in needed_ids if x is not None]
+    if not ids:
+        return set()
+
+    present = set()
+    cursor = dst_conn.cursor()
+    try:
+        chunk = 1000
+        for i in range(0, len(ids), chunk):
+            part = ids[i:i + chunk]
+            placeholders = ", ".join("?" for _ in part)
+            cursor.execute(
+                f"SELECT [{parent_pk_col}] FROM dbo.[{table_clean}] "
+                f"WHERE [{parent_pk_col}] IN ({placeholders})",
+                tuple(part),
+            )
+            for (val,) in cursor.fetchall():
+                if val is not None:
+                    present.add(str(val))
+    except Exception as e:
+        Logger.warn(f"Could not check parent rows in {table_clean}: {e}")
+        return {str(x) for x in ids}
+    finally:
+        cursor.close()
+    return present
+
+
+def defer_children_missing_parents(rows, links, parent_sets):
+    """Split rows into (ready, deferred) by whether each FK's parent is on target.
+
+    Unlike remap_child_fks this never rewrites FK values — in upsert mode the
+    source key IS the target key. Rows whose parent has not arrived yet are
+    deferred so they are retried instead of failing with FK error 547 and being
+    marked processed.
+    """
+    ready, deferred = [], []
+    for row in rows:
+        lower_index = {k.lower(): k for k in row.keys()}
+        defer = False
+        for fk_col, parent_table, _parent_pk in links:
+            key = lower_index.get(fk_col.lower())
+            if key is None:
+                continue
+            val = row.get(key)
+            if val is None:
+                continue
+            if str(val) not in parent_sets.get(parent_table.lower(), set()):
+                defer = True
+                break
+        (deferred if defer else ready).append(row)
+    return ready, deferred
+
+
 def remap_child_fks(rows, links, id_maps):
     ready, deferred = [], []
     for row in rows:

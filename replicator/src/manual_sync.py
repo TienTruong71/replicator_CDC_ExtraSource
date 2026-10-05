@@ -6,22 +6,35 @@ from dotenv import load_dotenv
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 try:
-    from db_utils import connect_db, get_primary_key, ensure_table_exists, sync_schema_direct, get_source_prefix, get_source_id
+    from db_utils import (
+        connect_db, get_primary_key, get_key_columns, get_trigger_key_column,
+        ensure_table_exists, sync_schema_direct, get_source_prefix, get_source_id,
+    )
     from logger import Logger
 except ImportError:
-    from .db_utils import connect_db, get_primary_key, ensure_table_exists, sync_schema_direct, get_source_prefix, get_source_id
+    from .db_utils import (
+        connect_db, get_primary_key, get_key_columns, get_trigger_key_column,
+        ensure_table_exists, sync_schema_direct, get_source_prefix, get_source_id,
+    )
     from .logger import Logger
 
 load_dotenv()
 
-def get_target_pks(conn, table_name, pk_col):
-    """Fetch all PKs from target database into a set."""
+def get_target_pks(conn, table_name, key_cols):
+    """Fetch the key of every target row as a set of tuples.
+
+    key_cols is the full row identity, so a composite-key table is compared on
+    all of its columns. Comparing on one column alone reported rows as already
+    present when only part of their key matched, so real missing rows were
+    never queued.
+    """
     cursor = conn.cursor()
     Logger.info(f"Fetching all IDs from Target for table {table_name}...")
 
     pks = set()
     table_clean = table_name.replace('[', '').replace(']', '').replace('dbo.', '')
-    query = f"SELECT [{pk_col}] FROM dbo.[{table_clean}]"
+    select_list = ", ".join(f"[{c}]" for c in key_cols)
+    query = f"SELECT {select_list} FROM dbo.[{table_clean}]"
 
     cursor.execute(query)
     count = 0
@@ -30,7 +43,7 @@ def get_target_pks(conn, table_name, pk_col):
         if not rows:
             break
         for row in rows:
-            pks.add(str(row[0]))
+            pks.add(tuple(str(v) for v in row))
             count += 1
         if count % 250000 == 0:
             Logger.info(f"  > Loaded {count:,} Target IDs...", indent=1)
@@ -158,10 +171,12 @@ def queue_missing_by_watermark(src_conn, audit_conn, table_name, pk_col, waterma
 def find_and_queue_missing(src_conn, dst_conn, audit_conn, table_name):
     """Find missing rows and insert them into sync_audit_log."""
     prefix = get_source_prefix()
-    pk_col = get_primary_key(table_name, prefix)
-    if not pk_col:
+
+    audit_col = get_trigger_key_column(table_name, prefix) or get_primary_key(table_name, prefix)
+    if not audit_col:
         Logger.error(f"Could not find PK for table {table_name}. Skipping.")
         return
+    pk_col = audit_col
 
     ensure_table_exists(src_conn, dst_conn, table_name)
     table_clean = table_name.replace('[', '').replace(']', '').replace('dbo.', '')
@@ -181,12 +196,42 @@ def find_and_queue_missing(src_conn, dst_conn, audit_conn, table_name):
             f"falling back to in-memory diff. Large non-numeric tables may exhaust RAM."
         )
         target_pks = get_target_source_record_ids(dst_conn, table_name, source_id)
+        key_cols = [audit_col]
+        compare_tuples = False
     else:
-        target_pks = get_target_pks(dst_conn, table_name, pk_col)
+        key_cols = get_key_columns(table_name, prefix)
+        if not key_cols:
+            key_cols = [audit_col]
+            Logger.warn(
+                f"{table_clean} has no PK or unique index — comparing on [{audit_col}] only; "
+                f"rows that share that value will look already present."
+            )
+        elif len(key_cols) > 1:
+            Logger.info(
+                f"{table_clean} has a composite key ({', '.join(key_cols)}) — "
+                f"comparing on all {len(key_cols)} columns.",
+                indent=1,
+            )
+        target_pks = get_target_pks(dst_conn, table_name, key_cols)
+        compare_tuples = True
+
+    if compare_tuples:
+        select_cols = list(key_cols)
+        lowered = [c.lower() for c in select_cols]
+        if audit_col.lower() in lowered:
+            audit_pos = lowered.index(audit_col.lower())
+        else:
+            select_cols.append(audit_col)
+            audit_pos = len(select_cols) - 1
+        cmp_len = len(key_cols)
+    else:
+        select_cols = [audit_col]
+        audit_pos = 0
+        cmp_len = 1
 
     src_cursor = src_conn.cursor()
-    src_query = f"SELECT [{pk_col}] FROM dbo.[{table_clean}]"
-
+    select_list = ", ".join(f"[{c}]" for c in select_cols)
+    src_query = f"SELECT {select_list} FROM dbo.[{table_clean}]"
     src_cursor.execute(src_query)
     missing_pks = []
     total_scanned = 0
@@ -201,9 +246,13 @@ def find_and_queue_missing(src_conn, dst_conn, audit_conn, table_name):
 
         for row in rows:
             total_scanned += 1
-            pk_val = str(row[0])
-            if pk_val not in target_pks:
-                missing_pks.append(pk_val)
+            if compare_tuples:
+                present = tuple(str(v) for v in row[:cmp_len]) in target_pks
+            else:
+                present = str(row[0]) in target_pks
+
+            if not present:
+                missing_pks.append(str(row[audit_pos]))
                 total_missing += 1
 
             if len(missing_pks) >= 50000:

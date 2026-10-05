@@ -6,10 +6,10 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from dotenv import load_dotenv
 
 try:
-    from db_utils import connect_db
+    from db_utils import connect_db, get_key_override
     from logger import Logger
 except ImportError:
-    from .db_utils import connect_db
+    from .db_utils import connect_db, get_key_override
     from .logger import Logger
 
 load_dotenv()
@@ -43,17 +43,33 @@ def _list_source_tables(cursor, prefix: str):
 
 def _get_pk_for_table(cursor, table: str):
     """
-    Return PK column name for a table with priority:
-    1. Official Primary Key
+    Return the column the trigger writes into sync_audit_log.pk_value, with priority:
+    1. Official Primary Key (first column by ordinal, for a composite key)
     2. Unique Index
     3. Column named 'id' or 'ID'
     4. First available column
+
+    For a composite key this is deliberately one column: the audit log holds a
+    single value and only needs to name the rows that changed. The replicator
+    re-reads full rows and matches the target on every key column, via
+    db_utils.get_key_columns. The ORDER BY matters — without it SQL Server may
+    hand back a different column of the same key on another call, and the
+    replicator would then look up pk_value in the wrong column.
+
+    {prefix}_KEY_OVERRIDE wins over all four, for tables whose key the catalog
+    does not declare.
     """
+    override = get_key_override(table)
+    if override:
+        Logger.info(f"Using configured key [{override[0]}] for {table}.", indent=1)
+        return override[0]
+
     cursor.execute(f"""
         SELECT c.COLUMN_NAME
         FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
         JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE c ON tc.CONSTRAINT_NAME = c.CONSTRAINT_NAME
         WHERE tc.TABLE_NAME = '{table}' AND tc.CONSTRAINT_TYPE = 'PRIMARY KEY'
+        ORDER BY c.ORDINAL_POSITION
     """)
     row = cursor.fetchone()
     if row:
@@ -124,19 +140,36 @@ def setup_single_table(conn, table: str, insert_only: bool = False) -> bool:
         CREATE TRIGGER dbo.[trig_cdc_{clean_table}_INS] ON dbo.[{table}] AFTER INSERT AS
         BEGIN
             SET NOCOUNT ON;
-            INSERT INTO dbo.sync_audit_log (table_name, pk_value, operation, status)
-            SELECT '{table}', CAST([{pk_col}] AS NVARCHAR(MAX)), 'I', 'pending' FROM inserted;
+            SET XACT_ABORT OFF;
+            IF OBJECT_ID('dbo.sync_audit_log', 'U') IS NULL
+                RETURN;
+            BEGIN TRY
+                INSERT INTO dbo.sync_audit_log (table_name, pk_value, operation, status)
+                SELECT '{table}', CAST([{pk_col}] AS NVARCHAR(MAX)), 'I', 'pending' FROM inserted;
+            END TRY
+            BEGIN CATCH
+            END CATCH
         END
         """)
 
-        cursor.execute(f"""
-        CREATE TRIGGER dbo.[trig_cdc_{clean_table}_UPD] ON dbo.[{table}] AFTER UPDATE AS
-        BEGIN
-            SET NOCOUNT ON;
-            INSERT INTO dbo.sync_audit_log (table_name, pk_value, operation, status)
-            SELECT '{table}', CAST([{pk_col}] AS NVARCHAR(MAX)), 'U', 'pending' FROM inserted;
-        END
-        """)
+        if insert_only:
+            Logger.info(f"Insert-only mode: no UPDATE trigger for {table}.", indent=1)
+        else:
+            cursor.execute(f"""
+            CREATE TRIGGER dbo.[trig_cdc_{clean_table}_UPD] ON dbo.[{table}] AFTER UPDATE AS
+            BEGIN
+                SET NOCOUNT ON;
+                SET XACT_ABORT OFF;
+                IF OBJECT_ID('dbo.sync_audit_log', 'U') IS NULL
+                    RETURN;
+                BEGIN TRY
+                    INSERT INTO dbo.sync_audit_log (table_name, pk_value, operation, status)
+                    SELECT '{table}', CAST([{pk_col}] AS NVARCHAR(MAX)), 'U', 'pending' FROM inserted;
+                END TRY
+                BEGIN CATCH
+                END CATCH
+            END
+            """)
 
         conn.commit()
         Logger.info(f"Triggers for {table} successfully created.", indent=1)
@@ -235,8 +268,8 @@ def setup_triggers():
         from .multi_source_config import MultiSourceConfig
 
     config_mgr = MultiSourceConfig()
-    sources = config_mgr.get_all_sources()
-    
+    sources = config_mgr.load_sources()
+
     if not sources:
         Logger.error("No sources configured for CDC Trigger Setup.")
         return
@@ -268,7 +301,7 @@ def auto_discover_new_tables(conn, prefix: str, insert_only: bool = False):
     cursor = conn.cursor()
     all_tables = _list_source_tables(cursor, prefix)
 
-    expected_count = 2
+    expected_count = 1 if insert_only else 2
 
     cursor.execute(f"""
         SELECT OBJECT_NAME(parent_id)
@@ -294,7 +327,7 @@ def get_monitored_tables(conn, prefix: str, insert_only: bool = False):
     cursor = conn.cursor()
     all_tables = _list_source_tables(cursor, prefix)
 
-    expected_count = 2
+    expected_count = 1 if insert_only else 2
 
     cursor.execute(f"""
         SELECT OBJECT_NAME(parent_id)
