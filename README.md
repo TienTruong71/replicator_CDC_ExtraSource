@@ -52,7 +52,7 @@ LEFT JOIN sys.default_constraints dc
 WHERE SCHEMA_NAME(t.schema_id) = 'dbo'
 ORDER BY insert_only_verdict DESC, key_source, t.name;
 
-
+=====================================================================
 
 ## SQL Delete Trigger
 SELECT name FROM sys.triggers
@@ -74,10 +74,31 @@ SELECT
 FROM sys.triggers
 ORDER BY name;
 
+=====================================================================
 
-=============
-CDC_Replicator.exe --sync-missing --table WH_Data_Main
+## Trakking data main DB
 
+DECLARE @sql NVARCHAR(MAX) = N'';
 
-CDC_Replicator.exe --sync-missing --table WH_DryRoom_Slot
-CDC_Replicator.exe --sync-missing
+SELECT @sql = @sql + N' UNION ALL SELECT ''' + t.name
+     + N''' AS table_name, COUNT_BIG(*) AS row_count FROM dbo.' + QUOTENAME(t.name)
+FROM sys.tables t
+WHERE SCHEMA_NAME(t.schema_id) = 'dbo'
+  AND t.name NOT IN ('sync_audit_log', 'sync_dedup_tracker', 'sync_source_registry', 'sysdiagrams')
+  AND t.name NOT LIKE 'MSr%'
+  AND t.name NOT LIKE '%[_]tracking';
+
+SET @sql = STUFF(@sql, 1, 11, N'') + N' ORDER BY table_name;';
+EXEC sp_executesql @sql;
+
+## Trakking status sync_audit_log
+
+SELECT status, COUNT_BIG(*) AS cnt
+FROM dbo.sync_audit_log
+GROUP BY status;
+
+SELECT table_name, COUNT_BIG(*) AS pending
+FROM dbo.sync_audit_log
+WHERE status = 'pending'
+GROUP BY table_name
+ORDER BY pending DESC;

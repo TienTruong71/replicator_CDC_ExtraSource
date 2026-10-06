@@ -66,6 +66,37 @@ def _row_val_ci(row, col):
     return None
 
 
+def _key_token(v):
+    """Normalize one key value so source and target renderings compare equal.
+
+    Source datetimes arrive as strings with a forced 3-digit fraction, while
+    target datetimes read back as datetime objects that str() renders without
+    any fraction when microsecond is 0. Both sides collapse to the same token
+    here: trailing zero fractions are dropped and 'T' separators normalized.
+    """
+    if v is None:
+        return None
+    if isinstance(v, (datetime, date)):
+        s = v.isoformat(sep=" ")
+    elif isinstance(v, Decimal):
+        return str(float(v))
+    else:
+        s = str(v)
+    s = s.strip()
+    if "T" in s:
+        s = s.replace("T", " ", 1)
+    if s.endswith("Z"):
+        s = s[:-1]
+    if "." in s and re.match(r"^\d{4}-\d{2}-\d{2}[ ]\d{2}:\d{2}:\d{2}\.\d+$", s):
+        s = s.rstrip("0").rstrip(".")
+    return s
+
+
+def _row_key_tuple(row, key_cols):
+    """Build the comparison key for a row, normalized by _key_token."""
+    return tuple(_key_token(_row_val_ci(row, c)) for c in key_cols)
+
+
 def cleanup_processed_audit_log(conn, retention_days: int) -> int:
     """Delete 'processed' rows from sync_audit_log older than retention_days.
 
@@ -564,6 +595,22 @@ def upsert_data_odbc(dst_conn, table, rows, primary_key, insert_only=False,
         composite = len(key_cols) > 1
 
 
+        if len(rows) > 1:
+            seen_keys = set()
+            deduped = []
+            for r in rows:
+                row_key = _row_key_tuple(r, key_cols)
+                if row_key in seen_keys:
+                    continue
+                seen_keys.add(row_key)
+                deduped.append(r)
+            if len(deduped) < len(rows):
+                Logger.warn(
+                    f"{table}: collapsed {len(rows) - len(deduped)} duplicate row(s) sharing key "
+                    f"({', '.join(key_cols)}) within this batch."
+                )
+                rows = deduped
+
         report_col = (audit_key_col or pk_col).lower()
         report_vals = [_row_val_ci(r, report_col) for r in rows]
 
@@ -631,6 +678,7 @@ def upsert_data_odbc(dst_conn, table, rows, primary_key, insert_only=False,
             col_list = ", ".join(f"[{c}]" for c in columns)
             placeholders_vals = ", ".join(["?" for _ in columns])
             update_by_record_id = insert_only and has_source_id and has_record_id
+            match_on_source_id = has_source_id and 'sync_source_id' in key_cols
             if insert_only:
                 key_cols_set = {pk_col}
             else:
@@ -639,7 +687,7 @@ def upsert_data_odbc(dst_conn, table, rows, primary_key, insert_only=False,
                 c for c in columns
                 if c.lower() not in key_cols_set
                 and c.lower() not in identity_cols
-                and c.lower() != 'sync_source_id'
+                and not (c.lower() == 'sync_source_id' and (insert_only or match_on_source_id))
             ]
             if update_by_record_id:
                 update_cols = [c for c in update_cols if c.lower() != 'source_record_id']
@@ -710,7 +758,7 @@ def upsert_data_odbc(dst_conn, table, rows, primary_key, insert_only=False,
                         where_sql = f"[{key_cols[0]}] IN ({placeholders_pk})"
                         params = [r.get(key_cols[0]) for r in chunk_rows]
 
-                    if has_source_id:
+                    if match_on_source_id:
                         source_id_val = rows[0].get('sync_source_id')
                         check_query = (
                             f"SELECT {key_select} FROM {table_full} "
@@ -722,10 +770,10 @@ def upsert_data_odbc(dst_conn, table, rows, primary_key, insert_only=False,
                         cursor.execute(check_query, tuple(params))
 
                     for r in cursor.fetchall():
-                        existing_keys.add(tuple(str(v) for v in r))
+                        existing_keys.add(tuple(_key_token(v) for v in r))
 
                 for row in rows:
-                    row_key = tuple(str(row.get(c)) for c in key_cols)
+                    row_key = _row_key_tuple(row, key_cols)
 
                     if row_key in existing_keys:
                         update_values = [row.get(c) for c in update_cols]
@@ -733,7 +781,7 @@ def upsert_data_odbc(dst_conn, table, rows, primary_key, insert_only=False,
                         if any(v is None for v in key_values):
                             null_update_rows.append(row)
                             continue
-                        if has_source_id:
+                        if match_on_source_id:
                             update_params.append(tuple(update_values + key_values + [row.get('sync_source_id')]))
                         else:
                             update_params.append(tuple(update_values + key_values))
@@ -748,7 +796,7 @@ def upsert_data_odbc(dst_conn, table, rows, primary_key, insert_only=False,
                 key_pred = " AND ".join(f"[{c}] = ?" for c in key_cols)
                 if update_by_record_id:
                     update_sql = f"UPDATE {table_full} SET {set_clauses_exec} WHERE [sync_source_id] = ? AND [source_record_id] = ?"
-                elif has_source_id:
+                elif match_on_source_id:
                     update_sql = f"UPDATE {table_full} SET {set_clauses_exec} WHERE {key_pred} AND [sync_source_id] = ?"
                 else:
                     update_sql = f"UPDATE {table_full} SET {set_clauses_exec} WHERE {key_pred}"
@@ -763,10 +811,11 @@ def upsert_data_odbc(dst_conn, table, rows, primary_key, insert_only=False,
                         try:
                             cursor.executemany(update_sql, chunk)
                             success = True
-                        except Exception:
+                        except Exception as fast_update_error:
                             FAST_EXEC_FAIL_CACHE.add(table_full)
                             use_fast_update = False
                             Logger.warn(f"Switching {table} UPDATE to stable sync mode.")
+                            Logger.error(f"  {table}: first batch update error was", exc=fast_update_error)
 
                     if not success:
                         for row_params, rep_key in zip(chunk, chunk_keys):
@@ -790,7 +839,7 @@ def upsert_data_odbc(dst_conn, table, rows, primary_key, insert_only=False,
                             key_vals.append(v)
                     where_clause = " AND ".join(parts)
                     params = [row.get(c) for c in update_cols] + key_vals
-                    if has_source_id:
+                    if match_on_source_id:
                         where_clause += " AND [sync_source_id] = ?"
                         params.append(row.get('sync_source_id'))
                     try:
@@ -820,8 +869,26 @@ def upsert_data_odbc(dst_conn, table, rows, primary_key, insert_only=False,
                     insert_params = [
                         p + (p[src_id_pos], p[rec_id_pos]) for p in insert_params
                     ]
-                else:
+                key_pos = [cols_lower.index(c) for c in key_cols if c in cols_lower]
+                guard_upsert = not guard_insert and len(key_pos) == len(key_cols)
+
+                if guard_upsert:
+                    select_list = ", ".join(["?" for _ in columns])
+                    key_pred_guard = " AND ".join(f"[{c}] = ?" for c in key_cols)
+                    insert_sql = (
+                        f"INSERT INTO {table_full} ({col_list}) "
+                        f"SELECT {select_list} WHERE NOT EXISTS ("
+                        f"SELECT 1 FROM {table_full} WITH (UPDLOCK, HOLDLOCK) "
+                        f"WHERE {key_pred_guard})"
+                    )
+                    insert_params = [
+                        p + tuple(p[pos] for pos in key_pos) for p in insert_params
+                    ]
+                elif not guard_insert:
                     insert_sql = f"INSERT INTO {table_full} ({col_list}) VALUES ({placeholders_vals})"
+
+                guarded_sql = guard_insert or guard_upsert
+
                 chunk_size_exec = 1000
                 use_fast = table_full not in FAST_EXEC_FAIL_CACHE
 
@@ -833,18 +900,19 @@ def upsert_data_odbc(dst_conn, table, rows, primary_key, insert_only=False,
                         try:
                             cursor.executemany(insert_sql, chunk)
                             success = True
-                        except Exception:
+                        except Exception as fast_error:
                             FAST_EXEC_FAIL_CACHE.add(table_full)
                             use_fast = False
-                            Logger.warn(f"Switching {table} to stable sync mode (fast mode unsupported).")
+                            Logger.warn(f"Switching {table} to stable sync mode after batch insert failed.")
+                            Logger.error(f"  {table}: first batch insert error was", exc=fast_error)
 
                     if not success:
-                        sub_chunk_size = 200
+                        sub_chunk_size = max(1, 2000 // max(1, len(columns)))
                         for j in range(0, len(chunk), sub_chunk_size):
                             sub_chunk = chunk[j:j+sub_chunk_size]
                             sub_keys = chunk_keys[j:j+sub_chunk_size]
 
-                            if guard_insert:
+                            if guarded_sql:
                                 for row_params, rep_key in zip(sub_chunk, sub_keys):
                                     try:
                                         cursor.execute(insert_sql, row_params)
