@@ -76,7 +76,7 @@ ORDER BY name;
 
 =====================================================================
 
-## Trakking data main DB
+## Check data main DB
 
 DECLARE @sql NVARCHAR(MAX) = N'';
 
