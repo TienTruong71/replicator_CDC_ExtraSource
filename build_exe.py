@@ -146,6 +146,7 @@ def create_simple_build():
             '--hidden-import', 'dotenv',
             '--hidden-import', 'uuid',
             '--console',
+            '--noupx',
             'auto_setup.py'
         ]
 

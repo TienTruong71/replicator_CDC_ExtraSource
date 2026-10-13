@@ -1,3 +1,4 @@
+import os
 import time
 
 try:
@@ -14,6 +15,65 @@ _FK_CACHE_TTL = 300.0
 def _scope(full_map, tables):
     tables_lower = {t.lower() for t in tables}
     return {c: links for c, links in full_map.items() if c in tables_lower}
+
+
+def _declared_fk_links(prefix="SOURCE"):
+    """Parse FK relationships declared in the environment.
+
+    Format: SOURCE_FK_LINKS=child.child_col->parent.parent_col, ...
+
+    Needed when the target has no real FK constraints, which is the case for
+    tables created by the older replicator (plain column DDL, no keys). Without
+    a declared link, discover_fk_relationships finds nothing and insert-only
+    copies the child's FK value verbatim — it would then point at whichever row
+    happens to own that id on the target, silently joining to the wrong parent
+    once a second source feeds the same table.
+    """
+    raw = os.getenv(f"{prefix}_FK_LINKS", "").strip()
+    if not raw:
+        return {}
+
+    declared = {}
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        if "->" not in entry:
+            Logger.warn(f"{prefix}_FK_LINKS: skipping '{entry}' — expected 'child.col->parent.col'.")
+            continue
+        child_part, parent_part = (p.strip() for p in entry.split("->", 1))
+        if child_part.count(".") != 1 or parent_part.count(".") != 1:
+            Logger.warn(f"{prefix}_FK_LINKS: skipping '{entry}' — expected 'child.col->parent.col'.")
+            continue
+        child_table, child_col = (s.strip().strip("[]") for s in child_part.split("."))
+        parent_table, parent_col = (s.strip().strip("[]") for s in parent_part.split("."))
+        if not all((child_table, child_col, parent_table, parent_col)):
+            Logger.warn(f"{prefix}_FK_LINKS: skipping '{entry}' — empty table or column name.")
+            continue
+        declared.setdefault(child_table.lower(), []).append((child_col, parent_table, parent_col))
+
+    return declared
+
+
+def _merge_declared_links(discovered, prefix="SOURCE"):
+    """Add env-declared links to the discovered map, skipping any duplicates."""
+    declared = _declared_fk_links(prefix)
+    if not declared:
+        return discovered
+
+    added = 0
+    for child_l, links in declared.items():
+        existing = discovered.setdefault(child_l, [])
+        seen = {(c.lower(), p.lower()) for c, p, _pk in existing}
+        for child_col, parent_table, parent_col in links:
+            if (child_col.lower(), parent_table.lower()) in seen:
+                continue
+            existing.append((child_col, parent_table, parent_col))
+            added += 1
+
+    if added:
+        Logger.info(f"Added {added} FK link(s) declared in {prefix}_FK_LINKS (no constraint on target).")
+    return discovered
 
 
 def discover_fk_relationships(dst_conn, tables, cache_key="default"):
@@ -61,6 +121,8 @@ def discover_fk_relationships(dst_conn, tables, cache_key="default"):
             continue
         parent_table, parent_col, child_table, child_col = cols[0]
         result.setdefault(child_table.lower(), []).append((child_col, parent_table, parent_col))
+
+    result = _merge_declared_links(result)
 
     _FK_CACHE[cache_key] = result
     _FK_CACHE_TS[cache_key] = now

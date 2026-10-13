@@ -102,3 +102,47 @@ FROM dbo.sync_audit_log
 WHERE status = 'pending'
 GROUP BY table_name
 ORDER BY pending DESC;
+
+
+## backfill theo lô 
+  USE [Dimension];
+DECLARE @n INT = 1;
+WHILE @n > 0
+BEGIN
+    UPDATE TOP (20000) dbo.dimension_data
+    SET sync_source_id = '192.168.8.59',
+        source_record_id = CAST(id AS NVARCHAR(100))
+    WHERE sync_source_id IS NULL;
+    SET @n = @@ROWCOUNT;
+END
+
+
+
+## drop trigger
+USE [Dimension];
+SELECT 'DROP TRIGGER dbo.[' + tr.name + '];' AS cmd
+FROM sys.triggers tr
+WHERE tr.name LIKE 'trig_cdc_%'
+  AND OBJECT_NAME(tr.parent_id) NOT IN
+      ('dimension_data','dimension_detail_data','dimension_detail_data_new');
+
+
+
+## clear audit
+ USE [Dimension];
+DELETE FROM dbo.sync_audit_log
+WHERE table_name NOT IN ('dimension_data','dimension_detail_data','dimension_detail_data_new');
+
+
+## add column 
+USE [Dimension];
+ALTER TABLE dbo.dimension_data            ADD sync_source_id NVARCHAR(50) NULL, source_record_id NVARCHAR(100) NULL;
+ALTER TABLE dbo.dimension_detail_data     ADD sync_source_id NVARCHAR(50) NULL, source_record_id NVARCHAR(100) NULL;
+ALTER TABLE dbo.dimension_detail_data_new ADD sync_source_id NVARCHAR(50) NULL, source_record_id NVARCHAR(100) NULL;
+
+
+
+
+python setup.py --setup-triggers — phải thấy đúng 3 dòng Triggers for ... successfully created
+python setup.py --sync-missing --table <từng bảng> — phải in Watermark for ... = <số khớp bước trên>. Thấy No watermark thì dừng ngay
+python setup.py --run
