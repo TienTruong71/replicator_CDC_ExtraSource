@@ -13,7 +13,7 @@ try:
         upsert_data_odbc,
         sync_schema_direct, fetch_rows_by_pks,
         get_source_id, claim_source_identity,
-        cleanup_processed_audit_log,
+        cleanup_processed_audit_log, source_record_token,
     )
 except ImportError:
     from .db_utils import (
@@ -22,7 +22,7 @@ except ImportError:
         upsert_data_odbc,
         sync_schema_direct, fetch_rows_by_pks,
         get_source_id, claim_source_identity,
-        cleanup_processed_audit_log,
+        cleanup_processed_audit_log, source_record_token,
     )
 
 try:
@@ -70,6 +70,7 @@ AUDIT_LOG_RETENTION_DAYS = int(os.getenv("AUDIT_LOG_RETENTION_DAYS", "7"))
 AUDIT_LOG_CLEANUP_INTERVAL = float(os.getenv("AUDIT_LOG_CLEANUP_INTERVAL", "3600.0"))
 
 MAX_FK_DEFER_RETRIES = int(os.getenv("MAX_FK_DEFER_RETRIES", "10"))
+ADOPT_LEGACY_ROWS = os.getenv("SOURCE_ADOPT_LEGACY", "false").strip().lower() in ("true", "1", "yes", "on")
 
 
 def start_replicator():
@@ -262,6 +263,19 @@ def start_replicator():
                                 r['sync_source_id'] = machine_id
 
                             links = fk_map.get(table.lower())
+                            # A child whose PK is also its FK to the parent (1-1
+                            # extension table): remap rewrites that PK, so the source
+                            # identity must be captured first and the PK kept on write.
+                            shared_pk = bool(
+                                config.insert_only and links
+                                and pk_col.lower() in {fk_col.lower() for fk_col, _p, _pp in links}
+                            )
+                            defer_key_col = audit_col
+                            if shared_pk:
+                                for r in valid_rows:
+                                    r['source_record_id'] = source_record_token(_row_value_ci(r, pk_col))
+                                defer_key_col = 'source_record_id'
+
                             if links:
                                 if config.insert_only:
                                     id_maps = {}
@@ -269,7 +283,8 @@ def start_replicator():
                                         needed = {_row_value_ci(r, fk_col) for r in valid_rows}
                                         needed.discard(None)
                                         id_maps[parent_table.lower()] = build_parent_id_map(
-                                            dst_conn, parent_table, parent_pk_col, machine_id, needed
+                                            dst_conn, parent_table, parent_pk_col, machine_id, needed,
+                                            adopt_legacy=ADOPT_LEGACY_ROWS,
                                         )
                                     ready_rows, deferred_rows = remap_child_fks(valid_rows, links, id_maps)
                                 else:
@@ -284,7 +299,7 @@ def start_replicator():
                                         valid_rows, links, parent_sets
                                     )
 
-                                deferred_pks = {str(_row_value_ci(r, audit_col)) for r in deferred_rows}
+                                deferred_pks = {str(_row_value_ci(r, defer_key_col)) for r in deferred_rows}
                                 valid_rows = ready_rows
                                 if deferred_rows:
                                     Logger.info(
@@ -298,6 +313,8 @@ def start_replicator():
                                     insert_only=config.insert_only,
                                     key_columns=key_cols,
                                     audit_key_col=audit_col,
+                                    preserve_pk=shared_pk,
+                                    adopt_legacy=ADOPT_LEGACY_ROWS,
                                 ) or set()
                                 written = len(valid_rows) - len(failed_pks)
                                 if failed_pks:

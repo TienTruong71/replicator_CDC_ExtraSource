@@ -16,6 +16,7 @@ load_dotenv()
 
 FAST_EXEC_FAIL_CACHE = set()
 SOURCE_SELECT_CACHE = {}
+KEPT_KEY_WARNED = set()
 
 
 def get_source_prefix() -> str:
@@ -410,7 +411,8 @@ def get_trigger_key_column(table_name: str, prefix: str, cursor=None):
             (table_name_clean,),
         )
         for (body,) in cursor.fetchall():
-            m = re.search(r"CAST\(\s*\[([^\]]+)\]\s+AS\s+NVARCHAR", body or "", re.I)
+            m = (re.search(r"CAST\(\s*\[([^\]]+)\]\s+AS\s+NVARCHAR", body or "", re.I)
+                 or re.search(r"CONVERT\(\s*NVARCHAR\s*\(\s*MAX\s*\)\s*,\s*(?:CAST\(\s*)?\[([^\]]+)\]", body or "", re.I))
             if m:
                 return m.group(1)
         return None
@@ -495,8 +497,29 @@ def get_primary_key(table_name: str, prefix: str, cursor=None):
     return row[0] if row else None
 
 
+def source_record_token(v):
+    """Render a source key value the way upsert_data_odbc stores it in source_record_id.
+
+    Mirrors the row normalization at the top of upsert_data_odbc, so a value
+    stamped before that normalization runs still matches rows stamped after it.
+    """
+    if v is None:
+        return None
+    if isinstance(v, bytes):
+        v = v.decode("utf-8", errors="ignore").strip()
+    elif isinstance(v, (datetime, date)):
+        v = v.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+    elif isinstance(v, Decimal):
+        v = float(v)
+    elif isinstance(v, uuid.UUID):
+        v = str(v).upper()
+    elif isinstance(v, str):
+        v = v.strip()
+    return str(v)
+
+
 def upsert_data_odbc(dst_conn, table, rows, primary_key, insert_only=False,
-                     key_columns=None, audit_key_col=None):
+                     key_columns=None, audit_key_col=None, preserve_pk=False, adopt_legacy=False):
     """
     Safe UPSERT for SQL Server via ODBC.
     Auto-casts data to correct SQL types to prevent ODBC 07006 errors.
@@ -506,6 +529,11 @@ def upsert_data_odbc(dst_conn, table, rows, primary_key, insert_only=False,
     matching on one column alone pushes one row onto another row's key.
     audit_key_col: the column whose values the audit log holds, used to report
     which queued changes failed.
+    preserve_pk: insert-only only. The caller has already stamped
+    source_record_id and the primary key column holds a remapped FK value — a
+    child table whose PK is also its FK to the parent. The PK is then written
+    as-is instead of stripped, and failures are reported by source_record_id
+    because the PK no longer holds the source value.
 
     Returns a set of audit_key_col values whose rows did NOT land on the target,
     so the caller can keep those audit rows pending instead of marking them
@@ -611,7 +639,8 @@ def upsert_data_odbc(dst_conn, table, rows, primary_key, insert_only=False,
                 )
                 rows = deduped
 
-        report_col = (audit_key_col or pk_col).lower()
+        preserve_pk = preserve_pk and insert_only
+        report_col = 'source_record_id' if preserve_pk else (audit_key_col or pk_col).lower()
         report_vals = [_row_val_ci(r, report_col) for r in rows]
 
         if insert_only:
@@ -619,6 +648,8 @@ def upsert_data_odbc(dst_conn, table, rows, primary_key, insert_only=False,
             original_pk_key = (primary_key or columns[0]).lower()
             missing_pk = 0
             for row in rows:
+                if preserve_pk and row.get('source_record_id') is not None:
+                    continue
                 if original_pk_key in row and row[original_pk_key] is not None:
                     row['source_record_id'] = str(row[original_pk_key])
                 else:
@@ -632,8 +663,28 @@ def upsert_data_odbc(dst_conn, table, rows, primary_key, insert_only=False,
 
             strip_cols = set(identity_cols)
             source_pk_key = (primary_key or columns[0]).lower()
-            if source_pk_key != 'source_record_id':
-                strip_cols.add(source_pk_key)
+            if source_pk_key != 'source_record_id' and not preserve_pk:
+   
+                cursor.execute(
+                    "SELECT c.name FROM sys.columns c "
+                    "WHERE c.object_id = OBJECT_ID(?) AND c.default_object_id <> 0",
+                    (table_full,),
+                )
+                default_cols = {r[0].lower() for r in cursor.fetchall()}
+                if source_pk_key in identity_cols or source_pk_key in default_cols:
+                    strip_cols.add(source_pk_key)
+                elif table_full not in KEPT_KEY_WARNED:
+                    KEPT_KEY_WARNED.add(table_full)
+                    Logger.warn(
+                        f"{table}: key '{source_pk_key}' has no IDENTITY/DEFAULT on the target — "
+                        f"copying the source value instead of letting the target generate one. "
+                        f"Rows from different sources can collide on it."
+                    )
+            if preserve_pk and source_pk_key in identity_cols:
+                Logger.warn(
+                    f"{table}: PK '{source_pk_key}' is an FK to its parent but IDENTITY on the target — "
+                    f"the remapped parent key cannot be written and the 1-1 link is lost."
+                )
 
             if strip_cols:
                 Logger.info(f"Insert-only mode: stripping target-generated columns {strip_cols}")
@@ -716,6 +767,33 @@ def upsert_data_odbc(dst_conn, table, rows, primary_key, insert_only=False,
                             (source_id_val,) + tuple(chunk),
                         )
                         existing_rec_ids.update({str(r[0]) for r in cursor.fetchall()})
+
+                    missing_rec_ids = [x for x in dict.fromkeys(rec_ids) if x not in existing_rec_ids]
+                    if adopt_legacy and missing_rec_ids:
+                        adopted = 0
+                        try:
+                            for i in range(0, len(missing_rec_ids), chunk_size_check):
+                                chunk = missing_rec_ids[i:i + chunk_size_check]
+                                placeholders_rec = ", ".join(["?" for _ in chunk])
+                                cursor.execute(
+                                    f"SELECT DISTINCT [{original_pk_key}] FROM {table_full} "
+                                    f"WHERE [sync_source_id] IS NULL AND [{original_pk_key}] IN ({placeholders_rec})",
+                                    tuple(chunk),
+                                )
+                                found = [source_record_token(r[0]) for r in cursor.fetchall() if r[0] is not None]
+                                for rec in found:
+                                    cursor.execute(
+                                        f"UPDATE TOP (1) {table_full} SET [sync_source_id] = ?, [source_record_id] = ? "
+                                        f"WHERE [sync_source_id] IS NULL AND [{original_pk_key}] = ?",
+                                        (source_id_val, rec, rec),
+                                    )
+                                    if cursor.rowcount:
+                                        existing_rec_ids.add(rec)
+                                        adopted += 1
+                        except Exception as adopt_err:
+                            Logger.warn(f"{table}: could not adopt legacy rows by [{original_pk_key}]: {adopt_err}")
+                        if adopted:
+                            Logger.info(f"{table}: labeled {adopted} legacy row(s) as {source_id_val} before update.")
 
                 for idx, row in enumerate(rows):
                     rec_id = row.get('source_record_id')

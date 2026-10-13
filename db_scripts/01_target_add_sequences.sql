@@ -1,17 +1,18 @@
-
 USE [QC];
 GO
 SET NOCOUNT ON;
 
 DECLARE @tables TABLE (tbl SYSNAME, col SYSNAME);
 INSERT INTO @tables (tbl, col) VALUES
- (N'air_tight_collin',            N'ID'),
- (N'air_tight_detail_A2502179',   N'ID'),
- (N'MocThuDongHoaKinKhi',         N'id'),
- (N'ScanQR1',                     N'ID'),
- (N'Temporary_State',             N'id'),
- (N'Serial_laser',                N'id'),
- (N'dimension_data',              N'id');
+ (N'air_tight_collin',          N'ID'),
+ (N'air_tight_detail_A2502179', N'ID'),
+ (N'MocThuDongHoaKinKhi',       N'id'),
+ (N'ScanQR1',                   N'ID'),
+ (N'Temporary_State',           N'id'),
+ (N'Serial_laser',              N'id'),
+ (N'dimension_data',            N'id'),
+ (N'Serial_laser_weekly',       N'id'),
+ (N'MocThuDongHoa',             N'id');
 
 DECLARE @tbl SYSNAME, @col SYSNAME, @seq SYSNAME, @df SYSNAME, @coltype SYSNAME,
         @start BIGINT, @sql NVARCHAR(MAX);

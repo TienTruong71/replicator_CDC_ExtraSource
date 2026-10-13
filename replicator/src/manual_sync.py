@@ -1,6 +1,7 @@
 import os
 import sys
 import time
+from datetime import datetime, date
 from dotenv import load_dotenv
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -9,16 +10,30 @@ try:
     from db_utils import (
         connect_db, get_primary_key, get_key_columns, get_trigger_key_column,
         ensure_table_exists, sync_schema_direct, get_source_prefix, get_source_id,
+        source_record_token,
     )
     from logger import Logger
 except ImportError:
     from .db_utils import (
         connect_db, get_primary_key, get_key_columns, get_trigger_key_column,
         ensure_table_exists, sync_schema_direct, get_source_prefix, get_source_id,
+        source_record_token,
     )
     from .logger import Logger
 
 load_dotenv()
+
+
+def _audit_token(v):
+    """Render a key value the way the CDC trigger writes pk_value.
+
+    str(datetime) yields six fractional digits, which SQL Server refuses to
+    convert back to datetime, so fetch_rows_by_pks could not read the row.
+    """
+    if isinstance(v, (datetime, date)):
+        return source_record_token(v)
+    return str(v)
+
 
 def get_target_pks(conn, table_name, key_cols):
     """Fetch the key of every target row as a set of tuples.
@@ -153,7 +168,7 @@ def queue_missing_by_watermark(src_conn, audit_conn, table_name, pk_col, waterma
         if not rows:
             break
         for row in rows:
-            missing_pks.append(str(row[0]))
+            missing_pks.append(_audit_token(row[0]))
             total += 1
             if len(missing_pks) >= 50000:
                 inject_to_audit_log(audit_conn, table_name, missing_pks)
@@ -249,10 +264,10 @@ def find_and_queue_missing(src_conn, dst_conn, audit_conn, table_name):
             if compare_tuples:
                 present = tuple(str(v) for v in row[:cmp_len]) in target_pks
             else:
-                present = str(row[0]) in target_pks
+                present = source_record_token(row[0]) in target_pks
 
             if not present:
-                missing_pks.append(str(row[audit_pos]))
+                missing_pks.append(_audit_token(row[audit_pos]))
                 total_missing += 1
 
             if len(missing_pks) >= 50000:

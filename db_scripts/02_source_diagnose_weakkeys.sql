@@ -11,7 +11,18 @@ INSERT INTO @checks (tbl, keycol) VALUES
  (N'Castingproduct',          N'Castingname'),
  (N'DMC_NG',                  N'MachineNo'),
  (N'Status_Error_Laser',      N'Status_error'),
- (N'Temporary_State_Setting', N'product');
+ (N'Temporary_State_Setting', N'product'),
+ (N'Matrix_Code',             N'Time'),
+ (N'CMMsixpackform',          N'product'),
+ (N'Coating1_X5-2_Temp1',     N'Time_get'),
+ (N'Image_test',              N'Ten'),
+ (N'Electrical',              N'Area'),
+ (N'QC_user',                 N'Name'),
+ (N'Temp_Humid_realtime',     N'Area'),
+ (N'Temp_Humid_Setting',      N'Area'),
+ (N'Laser_Transfer_User',     N'MSNV'),
+ (N'TV_DB',                   N'MachineNo'),
+ (N'CMM_Assessment_Permission', N'Customer');
 
 DECLARE @tbl SYSNAME, @col SYSNAME, @sql NVARCHAR(MAX);
 

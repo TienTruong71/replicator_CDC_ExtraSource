@@ -15,6 +15,20 @@ except ImportError:
 load_dotenv()
 
 
+def _tracks_updates(insert_only: bool, prefix: str = "SOURCE") -> bool:
+    """Whether source UPDATEs are captured with an _UPD trigger.
+
+    Upsert mode always needs them. Insert-only mode can apply an update too —
+    upsert_data_odbc matches the target row on (sync_source_id, source_record_id)
+    — but only if something queues the change, and only the trigger does. Without
+    it, rows edited in place on the source silently go stale on the target.
+    {prefix}_TRACK_UPDATES=false restores the old insert-only behaviour.
+    """
+    if not insert_only:
+        return True
+    return os.getenv(f"{prefix}_TRACK_UPDATES", "true").strip().lower() in ("true", "1", "yes", "on")
+
+
 def _list_source_tables(cursor, prefix: str):
     cursor.execute("""
         SELECT TABLE_NAME
@@ -111,6 +125,29 @@ def _get_pk_for_table(cursor, table: str):
     return None
 
 
+def _trigger_key_expr(cursor, table: str, pk_col: str) -> str:
+    """SQL expression the trigger writes into sync_audit_log.pk_value.
+
+    A plain CAST renders datetime as 'Oct 13 2026  8:53AM' - seconds and
+    milliseconds gone - so fetch_rows_by_pks matched nothing and the change was
+    marked processed without ever reaching the target. Style 121 keeps full
+    precision and is the same text upsert_data_odbc produces for these values.
+    db_utils.get_trigger_key_column parses both shapes.
+    """
+    cursor.execute(
+        "SELECT DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS "
+        "WHERE TABLE_SCHEMA = 'dbo' AND TABLE_NAME = ? AND COLUMN_NAME = ?",
+        (table, pk_col),
+    )
+    row = cursor.fetchone()
+    data_type = (row[0] or "").lower() if row else ""
+    if data_type in ("datetime", "smalldatetime"):
+        return f"CONVERT(NVARCHAR(MAX), CAST([{pk_col}] AS DATETIME2(3)), 121)"
+    if data_type == "datetime2":
+        return f"CONVERT(NVARCHAR(MAX), [{pk_col}], 121)"
+    return f"CAST([{pk_col}] AS NVARCHAR(MAX))"
+
+
 def setup_single_table(conn, table: str, insert_only: bool = False) -> bool:
     """
     Setup CDC triggers and queue existing rows for a single table.
@@ -125,6 +162,7 @@ def setup_single_table(conn, table: str, insert_only: bool = False) -> bool:
             return False
 
         Logger.info(f"Using '{pk_col}' as sync key for {table}.", indent=1)
+        key_expr = _trigger_key_expr(cursor, table, pk_col)
 
         for op in ['INS', 'UPD', 'DEL']:
             try:
@@ -145,15 +183,15 @@ def setup_single_table(conn, table: str, insert_only: bool = False) -> bool:
                 RETURN;
             BEGIN TRY
                 INSERT INTO dbo.sync_audit_log (table_name, pk_value, operation, status)
-                SELECT '{table}', CAST([{pk_col}] AS NVARCHAR(MAX)), 'I', 'pending' FROM inserted;
+                SELECT '{table}', {key_expr}, 'I', 'pending' FROM inserted;
             END TRY
             BEGIN CATCH
             END CATCH
         END
         """)
 
-        if insert_only:
-            Logger.info(f"Insert-only mode: no UPDATE trigger for {table}.", indent=1)
+        if not _tracks_updates(insert_only):
+            Logger.info(f"Insert-only mode with SOURCE_TRACK_UPDATES=false: no UPDATE trigger for {table}.", indent=1)
         else:
             cursor.execute(f"""
             CREATE TRIGGER dbo.[trig_cdc_{clean_table}_UPD] ON dbo.[{table}] AFTER UPDATE AS
@@ -164,7 +202,7 @@ def setup_single_table(conn, table: str, insert_only: bool = False) -> bool:
                     RETURN;
                 BEGIN TRY
                     INSERT INTO dbo.sync_audit_log (table_name, pk_value, operation, status)
-                    SELECT '{table}', CAST([{pk_col}] AS NVARCHAR(MAX)), 'U', 'pending' FROM inserted;
+                    SELECT '{table}', {key_expr}, 'U', 'pending' FROM inserted;
                 END TRY
                 BEGIN CATCH
                 END CATCH
@@ -301,7 +339,7 @@ def auto_discover_new_tables(conn, prefix: str, insert_only: bool = False):
     cursor = conn.cursor()
     all_tables = _list_source_tables(cursor, prefix)
 
-    expected_count = 1 if insert_only else 2
+    expected_count = 2 if _tracks_updates(insert_only, prefix) else 1
 
     cursor.execute(f"""
         SELECT OBJECT_NAME(parent_id)
@@ -327,7 +365,7 @@ def get_monitored_tables(conn, prefix: str, insert_only: bool = False):
     cursor = conn.cursor()
     all_tables = _list_source_tables(cursor, prefix)
 
-    expected_count = 1 if insert_only else 2
+    expected_count = 2 if _tracks_updates(insert_only, prefix) else 1
 
     cursor.execute(f"""
         SELECT OBJECT_NAME(parent_id)

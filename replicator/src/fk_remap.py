@@ -171,7 +171,7 @@ def topological_order(tables, fk_map):
     return [lower_to_orig[t] for t in ordered]
 
 
-def build_parent_id_map(dst_conn, parent_table, parent_pk_col, source_id, needed_src_ids):
+def build_parent_id_map(dst_conn, parent_table, parent_pk_col, source_id, needed_src_ids, adopt_legacy=False):
     if not needed_src_ids:
         return {}
     table_clean = parent_table.replace('[', '').replace(']', '').replace('dbo.', '')
@@ -191,6 +191,19 @@ def build_parent_id_map(dst_conn, parent_table, parent_pk_col, source_id, needed
             for src_rec, new_pk in cursor.fetchall():
                 if src_rec is not None:
                     id_map[str(src_rec)] = new_pk
+        missing = [x for x in ids if x not in id_map]
+        if adopt_legacy and missing:
+            for i in range(0, len(missing), chunk):
+                part = missing[i:i + chunk]
+                placeholders = ", ".join("?" for _ in part)
+                cursor.execute(
+                    f"SELECT [{parent_pk_col}] FROM dbo.[{table_clean}] "
+                    f"WHERE [sync_source_id] IS NULL AND [{parent_pk_col}] IN ({placeholders})",
+                    tuple(part),
+                )
+                for (legacy_pk,) in cursor.fetchall():
+                    if legacy_pk is not None:
+                        id_map[str(legacy_pk)] = legacy_pk
     finally:
         cursor.close()
     return id_map
