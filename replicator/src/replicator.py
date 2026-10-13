@@ -4,6 +4,7 @@ import os
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 import time
+import signal
 from dotenv import load_dotenv
 
 try:
@@ -73,8 +74,17 @@ MAX_FK_DEFER_RETRIES = int(os.getenv("MAX_FK_DEFER_RETRIES", "10"))
 ADOPT_LEGACY_ROWS = os.getenv("SOURCE_ADOPT_LEGACY", "false").strip().lower() in ("true", "1", "yes", "on")
 
 
+def _stop_on_sigterm(signum, frame):
+    raise KeyboardInterrupt
+
+
 def start_replicator():
     Logger.info("Starting Trigger-based CDC Replicator...")
+
+    try:
+        signal.signal(signal.SIGTERM, _stop_on_sigterm)
+    except (ValueError, AttributeError):
+        pass
 
     try:
         from multi_source_config import MultiSourceConfig

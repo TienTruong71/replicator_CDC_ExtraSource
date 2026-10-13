@@ -151,3 +151,9 @@ python setup.py --run
 
 =====================
 CDC_Replicator.exe --setup-triggers --no-pause
+
+
+
+=====================
+docker compose run --rm replicator auto
+docker compose logs -f

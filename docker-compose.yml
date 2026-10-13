@@ -1,16 +1,18 @@
 services:
   replicator:
     build:
-      context: ./replicator
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: replicator/Dockerfile
+    image: cdc-replicator:latest
     container_name: cdc_replicator
-    restart: always
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+    command: ["run"]
     environment:
-      - PYTHONUNBUFFERED=1
-    command: ["poetry", "run", "python", "-m", "src.replicator"]
-    env_file: .env
+      - TZ=Asia/Ho_Chi_Minh
     volumes:
-      - ./replicator/src:/app/src
+      - ./.env:/app/.env:ro
     logging:
       driver: "json-file"
       options:

@@ -12,7 +12,8 @@ __pycache__/
 */*/*/__pycache__/
 
 # Environments
-# .env
+.env
+**/.env
 .venv
 env/
 venv/
@@ -24,5 +25,9 @@ venv.bak/
 media/
 
 logs/
+dist/
+build/
+*.spec
+.claude/
 
 **/snapshots/**

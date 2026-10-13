@@ -193,8 +193,9 @@ def connect_db(prefix: str, target: bool = False):
         password = os.getenv(f"{prefix}_SQLSERVER_PASS", "")
         database = os.getenv(f"{prefix}_SQLSERVER_DB")
 
+    driver = os.getenv("ODBC_DRIVER", "").strip() or "ODBC Driver 17 for SQL Server"
     conn_str = (
-        f"DRIVER={{ODBC Driver 17 for SQL Server}};"
+        f"DRIVER={{{driver}}};"
         f"SERVER={host},{port};DATABASE={database};UID={user};PWD={password};"
         f"TrustServerCertificate=yes;"
     )
