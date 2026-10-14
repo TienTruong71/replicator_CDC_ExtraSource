@@ -143,8 +143,8 @@ ALTER TABLE dbo.dimension_detail_data_new ADD sync_source_id NVARCHAR(50) NULL, 
 
 
 
-python setup.py --setup-triggers — phải thấy đúng 3 dòng Triggers for ... successfully created
-python setup.py --sync-missing --table <từng bảng> — phải in Watermark for ... = <số khớp bước trên>. Thấy No watermark thì dừng ngay
+python setup.py --setup-triggers
+python setup.py --sync-missing --table <từng bảng>
 python setup.py --run
 
 
